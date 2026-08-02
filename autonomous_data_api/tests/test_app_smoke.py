@@ -187,7 +187,7 @@ def test_machine_discovery_and_crawler_surfaces(client):
             "/v1/sec/filing-trigger-delta",
             {
                 "cik": "320193",
-                "since_accession": "0000320193-26-000081",
+                "since_accession": "0000320193-26-000018",
                 "forms": ["8-K"],
                 "rules": ["FORM:8-K:ITEM:2.02"],
             },

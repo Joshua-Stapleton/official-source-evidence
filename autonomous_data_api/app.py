@@ -242,7 +242,7 @@ x402_routes: dict[str, RouteConfig] = {
             method="POST",
             input={
                 "cik": "0000320193",
-                "since_accession": "0000320193-26-000081",
+                "since_accession": "0000320193-26-000018",
                 "forms": ["8-K", "10-Q", "10-K"],
                 "rules": ["FORM:8-K:ITEM:2.02", "XBRL:us-gaap:Revenues"],
                 "max_source_age_seconds": 600,
@@ -814,7 +814,7 @@ def sec_sample() -> dict[str, Any]:
         "live_source_result": False,
         "request": {
             "cik": "0000320193",
-            "since_accession": "0000320193-26-000081",
+            "since_accession": "0000320193-26-000018",
             "forms": ["8-K", "10-Q", "10-K"],
             "rules": ["FORM:8-K:ITEM:2.02", "XBRL:us-gaap:Revenues"],
         },
@@ -987,7 +987,7 @@ def custom_openapi() -> dict[str, Any]:
             "price": f"{price_decimal(X402_SEC_PRICE):.6f}",
             "example": {
                 "cik": "0000320193",
-                "since_accession": "0000320193-26-000081",
+                "since_accession": "0000320193-26-000018",
                 "forms": ["8-K", "10-Q", "10-K"],
                 "rules": [
                     "FORM:8-K:ITEM:2.02",
