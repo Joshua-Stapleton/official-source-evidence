@@ -1,0 +1,33 @@
+app = "replace-with-unique-app-name"
+primary_region = "iad"
+
+[build]
+  dockerfile = "autonomous_data_api/Dockerfile"
+
+[env]
+  AUTONOMOUS_API_BASE_URL = "https://replace-with-unique-app-name.fly.dev"
+  AUTONOMOUS_EVIDENCE_BACKGROUND_REFRESH = "1"
+  AUTONOMOUS_EVIDENCE_DB_PATH = "/data/evidence.sqlite3"
+  AUTONOMOUS_EVIDENCE_ENABLED = "1"
+  AUTONOMOUS_EVIDENCE_REQUESTS_PER_MINUTE = "30"
+  AUTONOMOUS_X402_NETWORK = "eip155:8453"
+  AUTONOMOUS_X402_FACILITATOR_URL = "https://api.cdp.coinbase.com/platform/v2/x402"
+  AUTONOMOUS_X402_SEC_PRICE = "$0.10"
+  AUTONOMOUS_X402_OFAC_PRICE = "$0.05"
+
+[http_service]
+  internal_port = 8765
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+[[mounts]]
+  source = "evidence_data"
+  destination = "/data"
+
+[[vm]]
+  memory = "1gb"
+  cpu_kind = "shared"
+  cpus = 1

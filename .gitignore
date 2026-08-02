@@ -1,0 +1,11 @@
+.DS_Store
+.env
+.env.*
+.local/
+autonomous_data_api/runtime/
+autonomous_data_api/runtime.sqlite3
+__pycache__/
+.pytest_cache/
+*.pyc
+*.pem
+*.key
