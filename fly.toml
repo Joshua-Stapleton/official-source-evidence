@@ -1,35 +1,41 @@
-app = "iti-official-source-evidence"
-primary_region = "iad"
+# fly.toml app configuration file generated for iti-official-source-evidence on 2026-08-02T07:47:56Z
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'iti-official-source-evidence'
+primary_region = 'iad'
 
 [build]
-  dockerfile = "autonomous_data_api/Dockerfile"
+  dockerfile = 'autonomous_data_api/Dockerfile'
 
 [env]
-  AUTONOMOUS_API_BASE_URL = "https://iti-official-source-evidence.fly.dev"
-  AUTONOMOUS_EVIDENCE_BACKGROUND_REFRESH = "1"
-  AUTONOMOUS_EVIDENCE_DB_PATH = "/data/evidence.sqlite3"
-  AUTONOMOUS_EVIDENCE_ENABLED = "1"
-  AUTONOMOUS_EVIDENCE_REQUESTS_PER_MINUTE = "30"
-  AUTONOMOUS_SEC_USER_AGENT = "ITI-Studio-Official-Source-Evidence/0.2 https://signal.iti-studio.ai"
-  AUTONOMOUS_X402_NETWORK = "eip155:84532"
-  AUTONOMOUS_X402_FACILITATOR_URL = "https://x402.org/facilitator"
-  AUTONOMOUS_X402_PAY_TO = "0xBEa5af4566eD9F3017141Ba550fE033cA1D423c1"
-  AUTONOMOUS_X402_SEC_PRICE = "$0.10"
-  AUTONOMOUS_X402_OFAC_PRICE = "$0.05"
+  AUTONOMOUS_API_BASE_URL = 'https://iti-official-source-evidence.fly.dev'
+  AUTONOMOUS_EVIDENCE_BACKGROUND_REFRESH = '1'
+  AUTONOMOUS_EVIDENCE_DB_PATH = '/data/evidence.sqlite3'
+  AUTONOMOUS_EVIDENCE_ENABLED = '1'
+  AUTONOMOUS_EVIDENCE_REQUESTS_PER_MINUTE = '30'
+  AUTONOMOUS_SEC_USER_AGENT = 'ITI-Studio-Official-Source-Evidence/0.2 https://signal.iti-studio.ai'
+  AUTONOMOUS_X402_FACILITATOR_URL = 'https://x402.org/facilitator'
+  AUTONOMOUS_X402_NETWORK = 'eip155:84532'
+  AUTONOMOUS_X402_OFAC_PRICE = '$0.05'
+  AUTONOMOUS_X402_PAY_TO = '0xBEa5af4566eD9F3017141Ba550fE033cA1D423c1'
+  AUTONOMOUS_X402_SEC_PRICE = '$0.10'
+
+[[mounts]]
+  source = 'evidence_data'
+  destination = '/data'
 
 [http_service]
   internal_port = 8765
   force_https = true
-  auto_stop_machines = false
+  auto_stop_machines = 'off'
   auto_start_machines = true
   min_machines_running = 1
-  processes = ["app"]
-
-[[mounts]]
-  source = "evidence_data"
-  destination = "/data"
+  processes = ['app']
 
 [[vm]]
-  memory = "1gb"
-  cpu_kind = "shared"
+  memory = '1gb'
+  cpu_kind = 'shared'
   cpus = 1
+  memory_mb = 1024
