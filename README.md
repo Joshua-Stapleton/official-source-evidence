@@ -27,3 +27,14 @@ uvx ruff format --check autonomous_data_api
 docker build -t official-source-evidence-api:local \
   -f autonomous_data_api/Dockerfile .
 ```
+
+The ignored `.local/testnet-wallets.json` file can be used by the bounded live
+purchase check:
+
+```bash
+PYTHONPATH=. uv run --with-requirements autonomous_data_api/requirements.txt \
+  python autonomous_data_api/testnet_purchase.py
+```
+
+The runner preflights and verifies the Base Sepolia network, exact price,
+recipient, and resource URL before signing the payment.

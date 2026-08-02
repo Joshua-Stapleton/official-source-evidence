@@ -3,5 +3,5 @@ uvicorn[standard]>=0.30
 httpx>=0.27
 pytest>=8.0
 defusedxml>=0.7
-x402[extensions,fastapi]>=2.17.0,<3
+x402[extensions,fastapi,httpx]>=2.17.0,<3
 cdp-sdk>=1.47.1,<2
