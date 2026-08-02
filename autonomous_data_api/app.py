@@ -728,42 +728,42 @@ def retired_wedge(detail: str) -> JSONResponse:
     )
 
 
-@app.get("/v1/public/pfas/sample")
+@app.get("/v1/public/pfas/sample", include_in_schema=False)
 def public_pfas_sample() -> JSONResponse:
     return retired_wedge(
         "PFAS lead scoring is not part of the autonomous evidence experiment."
     )
 
 
-@app.get("/v1/public/grid/sample")
+@app.get("/v1/public/grid/sample", include_in_schema=False)
 def public_grid_sample() -> JSONResponse:
     return retired_wedge(
         "Grid lead scoring is not part of the autonomous evidence experiment."
     )
 
 
-@app.get("/v1/pfas/leads")
+@app.get("/v1/pfas/leads", include_in_schema=False)
 def pfas_leads() -> JSONResponse:
     return retired_wedge(
         "PFAS lead scoring is not part of the autonomous evidence experiment."
     )
 
 
-@app.get("/v1/grid/projects")
+@app.get("/v1/grid/projects", include_in_schema=False)
 def grid_projects() -> JSONResponse:
     return retired_wedge(
         "Grid lead scoring is not part of the autonomous evidence experiment."
     )
 
 
-@app.get("/v1/x402/pfas/leads")
+@app.get("/v1/x402/pfas/leads", include_in_schema=False)
 def retired_x402_pfas_leads() -> JSONResponse:
     return retired_wedge(
         "PFAS lead scoring is not part of the autonomous evidence experiment."
     )
 
 
-@app.get("/v1/x402/grid/projects")
+@app.get("/v1/x402/grid/projects", include_in_schema=False)
 def retired_x402_grid_projects() -> JSONResponse:
     return retired_wedge(
         "Grid lead scoring is not part of the autonomous evidence experiment."
