@@ -15,9 +15,7 @@ from x402.http.clients import x402HttpxClient
 from x402.mechanisms.evm import EthAccountSigner
 from x402.mechanisms.evm.exact.register import register_exact_evm_client
 
-ENDPOINT = (
-    "https://iti-official-source-evidence.fly.dev/v1/ofac/exact-identifier-evidence"
-)
+ENDPOINT = "https://evidence.iti-studio.ai/v1/ofac/exact-identifier-evidence"
 EXPECTED_NETWORK = "eip155:8453"
 EXPECTED_PAY_TO = "0x9500075649a70411c81f99c4314f6cff55d12579"
 EXPECTED_BUYER = "0x5Bd70c14C517dffC1bB3361274093A791306Ccdd"
