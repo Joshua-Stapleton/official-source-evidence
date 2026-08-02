@@ -1,0 +1,440 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Official Source Evidence - SEC and OFAC APIs for Agents</title>
+    <meta name="description" content="Pay-per-call SEC EDGAR filing deltas and exact OFAC identifier evidence with official-source hashes and signed receipts. No API key required.">
+    <meta name="robots" content="index,follow">
+    <link rel="canonical" href="https://iti-official-source-evidence.fly.dev/">
+    <link rel="icon" href="/favicon.ico">
+    <link rel="alternate" type="application/json" href="/.well-known/agent-service.json" title="Agent service manifest">
+    <meta property="og:type" content="website">
+    <meta property="og:title" content="Official Source Evidence">
+    <meta property="og:description" content="Source-hashed SEC and OFAC evidence, payable per call by autonomous agents over x402.">
+    <meta property="og:url" content="https://iti-official-source-evidence.fly.dev/">
+    <meta property="og:image" content="https://iti-official-source-evidence.fly.dev/icon.png">
+    <meta name="twitter:card" content="summary">
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "Official Source Evidence",
+        "applicationCategory": "DeveloperApplication",
+        "description": "Pay-per-call SEC EDGAR filing deltas and exact OFAC identifier evidence with official-source hashes and signed receipts.",
+        "url": "https://iti-official-source-evidence.fly.dev/",
+        "image": "https://iti-official-source-evidence.fly.dev/icon.png",
+        "provider": {"@type": "Organization", "name": "ITI Studio"},
+        "offers": [
+          {"@type": "Offer", "name": "OFAC exact identifier evidence", "price": "0.05", "priceCurrency": "USD"},
+          {"@type": "Offer", "name": "SEC filing trigger delta", "price": "0.10", "priceCurrency": "USD"}
+        ]
+      }
+    </script>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #172024;
+        --muted: #57666b;
+        --line: #cbd4d4;
+        --paper: #ffffff;
+        --wash: #f3f6f5;
+        --teal: #008f8a;
+        --teal-dark: #006c69;
+        --coral: #f16050;
+        --yellow: #f2c94c;
+      }
+
+      * { box-sizing: border-box; }
+
+      html { scroll-behavior: smooth; }
+
+      body {
+        margin: 0;
+        background: var(--paper);
+        color: var(--ink);
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        letter-spacing: 0;
+      }
+
+      a { color: inherit; }
+
+      .shell {
+        width: min(1120px, calc(100% - 40px));
+        margin: 0 auto;
+      }
+
+      header {
+        border-bottom: 1px solid var(--line);
+        background: var(--paper);
+      }
+
+      .nav {
+        min-height: 72px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 24px;
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        min-width: 0;
+        font-weight: 750;
+        text-decoration: none;
+      }
+
+      .brand img {
+        width: 42px;
+        height: 42px;
+        object-fit: cover;
+        flex: 0 0 auto;
+      }
+
+      .nav-links {
+        display: flex;
+        align-items: center;
+        gap: 20px;
+        font-size: 0.9rem;
+        font-weight: 650;
+      }
+
+      .nav-links a { text-decoration: none; }
+      .nav-links a:hover { color: var(--teal-dark); }
+
+      .hero {
+        padding: 72px 0 58px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .eyebrow {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        color: var(--teal-dark);
+        font-size: 0.78rem;
+        font-weight: 800;
+        text-transform: uppercase;
+      }
+
+      .live-dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: var(--teal);
+        box-shadow: 0 0 0 4px #d8f1ef;
+      }
+
+      h1 {
+        max-width: 840px;
+        margin: 20px 0 18px;
+        font-size: 4.75rem;
+        line-height: 0.98;
+        letter-spacing: 0;
+      }
+
+      .lead {
+        max-width: 780px;
+        margin: 0;
+        color: var(--muted);
+        font-size: 1.18rem;
+        line-height: 1.65;
+      }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-top: 30px;
+      }
+
+      .action {
+        display: inline-flex;
+        align-items: center;
+        min-height: 44px;
+        padding: 0 17px;
+        border: 1px solid var(--ink);
+        border-radius: 6px;
+        background: var(--ink);
+        color: #ffffff;
+        font-size: 0.92rem;
+        font-weight: 750;
+        text-decoration: none;
+      }
+
+      .action.secondary {
+        background: var(--paper);
+        color: var(--ink);
+      }
+
+      .action:hover {
+        border-color: var(--teal-dark);
+        background: var(--teal-dark);
+        color: #ffffff;
+      }
+
+      .rail {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        border-bottom: 1px solid var(--line);
+        background: var(--wash);
+      }
+
+      .rail-item {
+        min-height: 88px;
+        padding: 20px;
+        border-right: 1px solid var(--line);
+      }
+
+      .rail-item:last-child { border-right: 0; }
+
+      .rail-label {
+        display: block;
+        margin-bottom: 7px;
+        color: var(--muted);
+        font-size: 0.72rem;
+        font-weight: 800;
+        text-transform: uppercase;
+      }
+
+      .rail-value { font-weight: 750; }
+
+      section { padding: 62px 0; }
+
+      .section-heading {
+        display: flex;
+        align-items: end;
+        justify-content: space-between;
+        gap: 24px;
+        margin-bottom: 24px;
+      }
+
+      h2 {
+        margin: 0;
+        font-size: 1.7rem;
+        letter-spacing: 0;
+      }
+
+      .section-note {
+        max-width: 520px;
+        margin: 0;
+        color: var(--muted);
+        line-height: 1.5;
+      }
+
+      .endpoint-list { border-top: 1px solid var(--ink); }
+
+      .endpoint {
+        display: grid;
+        grid-template-columns: 112px minmax(0, 1fr) 92px;
+        gap: 24px;
+        padding: 28px 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .method {
+        width: fit-content;
+        color: var(--teal-dark);
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.82rem;
+        font-weight: 800;
+      }
+
+      .endpoint-path {
+        display: block;
+        overflow-wrap: anywhere;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.95rem;
+        font-weight: 750;
+      }
+
+      .endpoint-copy {
+        margin: 10px 0 12px;
+        color: var(--muted);
+        line-height: 1.55;
+      }
+
+      .endpoint-links {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 18px;
+        font-size: 0.86rem;
+        font-weight: 750;
+      }
+
+      .price {
+        text-align: right;
+        font-size: 1.3rem;
+        font-weight: 800;
+      }
+
+      .price small {
+        display: block;
+        margin-top: 4px;
+        color: var(--muted);
+        font-size: 0.72rem;
+        font-weight: 650;
+      }
+
+      .proof-band {
+        border-top: 1px solid var(--line);
+        border-bottom: 1px solid var(--line);
+        background: var(--ink);
+        color: #ffffff;
+      }
+
+      .proof-grid {
+        display: grid;
+        grid-template-columns: 1.2fr 1fr 1fr;
+        gap: 0;
+      }
+
+      .proof-item {
+        min-height: 190px;
+        padding: 34px;
+        border-right: 1px solid #405055;
+      }
+
+      .proof-item:last-child { border-right: 0; }
+
+      .proof-item strong {
+        display: block;
+        margin-bottom: 12px;
+        color: var(--yellow);
+        font-size: 0.76rem;
+        text-transform: uppercase;
+      }
+
+      .proof-item p {
+        margin: 0;
+        color: #d4dede;
+        line-height: 1.6;
+      }
+
+      footer {
+        padding: 28px 0 44px;
+        color: var(--muted);
+        font-size: 0.84rem;
+      }
+
+      .footer-row {
+        display: flex;
+        justify-content: space-between;
+        gap: 24px;
+      }
+
+      @media (max-width: 760px) {
+        .shell { width: min(100% - 28px, 1120px); }
+        .nav { align-items: flex-start; padding: 14px 0; }
+        .nav-links { gap: 12px; flex-wrap: wrap; justify-content: flex-end; }
+        .hero { padding: 52px 0 42px; }
+        h1 { font-size: 3rem; }
+        .lead { font-size: 1rem; }
+        .rail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .rail-item:nth-child(2) { border-right: 0; }
+        .rail-item:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
+        .section-heading { align-items: flex-start; flex-direction: column; }
+        .endpoint { grid-template-columns: 76px minmax(0, 1fr); gap: 16px; }
+        .price { grid-column: 2; text-align: left; }
+        .proof-grid { grid-template-columns: 1fr; }
+        .proof-item { min-height: 0; border-right: 0; border-bottom: 1px solid #405055; }
+        .proof-item:last-child { border-bottom: 0; }
+        .footer-row { flex-direction: column; }
+      }
+
+      @media (max-width: 480px) {
+        .brand span { max-width: 160px; }
+        .nav-links a:nth-child(2) { display: none; }
+        h1 { font-size: 2.45rem; }
+        .rail { grid-template-columns: 1fr; }
+        .rail-item { border-right: 0; border-bottom: 1px solid var(--line); }
+        .rail-item:nth-child(2) { border-right: 0; }
+        .rail-item:last-child { border-bottom: 0; }
+        .endpoint { grid-template-columns: 1fr; }
+        .price { grid-column: 1; }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="shell nav">
+        <a class="brand" href="/">
+          <img src="/icon.png" alt="">
+          <span>Official Source Evidence</span>
+        </a>
+        <nav class="nav-links" aria-label="Service navigation">
+          <a href="/docs">Docs</a>
+          <a href="/openapi.json">OpenAPI</a>
+          <a href="/.well-known/agent-service.json">Agent manifest</a>
+        </nav>
+      </div>
+    </header>
+
+    <main>
+      <div class="hero">
+        <div class="shell">
+          <div class="eyebrow"><span class="live-dot"></span>Live on Base mainnet</div>
+          <h1>Official Source Evidence</h1>
+          <p class="lead">Source-hashed SEC filing deltas and exact OFAC identifier evidence, delivered to autonomous agents through x402. No account, API key, or subscription.</p>
+          <div class="actions">
+            <a class="action" href="/docs">Open API docs</a>
+            <a class="action secondary" href="/.well-known/agent-service.json">Read machine manifest</a>
+          </div>
+        </div>
+      </div>
+
+      <div class="rail">
+        <div class="rail-item"><span class="rail-label">Payment</span><span class="rail-value">x402 v2</span></div>
+        <div class="rail-item"><span class="rail-label">Network</span><span class="rail-value">Base</span></div>
+        <div class="rail-item"><span class="rail-label">Asset</span><span class="rail-value">USDC</span></div>
+        <div class="rail-item"><span class="rail-label">Credentials</span><span class="rail-value">None</span></div>
+      </div>
+
+      <section>
+        <div class="shell">
+          <div class="section-heading">
+            <h2>Paid endpoints</h2>
+            <p class="section-note">Strict inputs are validated and official-source freshness is checked before a payment challenge is issued.</p>
+          </div>
+          <div class="endpoint-list">
+            <article class="endpoint">
+              <span class="method">POST</span>
+              <div>
+                <span class="endpoint-path">/v1/ofac/exact-identifier-evidence</span>
+                <p class="endpoint-copy">Exact OFAC SDN or Consolidated lookup for a crypto address, OFAC UID, or exact name. Returns source versions, hashes, matching records, limitations, and a signed receipt.</p>
+                <div class="endpoint-links"><a href="/v1/ofac/sample">Free sample</a><a href="/docs#/default/ofac_exact_identifier_evidence_v1_ofac_exact_identifier_evidence_post">Open schema</a></div>
+              </div>
+              <div class="price">$0.05<small>per result</small></div>
+            </article>
+            <article class="endpoint">
+              <span class="method">POST</span>
+              <div>
+                <span class="endpoint-path">/v1/sec/filing-trigger-delta</span>
+                <p class="endpoint-copy">Detect new SEC EDGAR 8-K, 10-Q, or 10-K filings since an accession and calculate selected deterministic XBRL fact deltas with source proof.</p>
+                <div class="endpoint-links"><a href="/v1/sec/sample">Free sample</a><a href="/docs#/default/sec_filing_trigger_delta_v1_sec_filing_trigger_delta_post">Open schema</a></div>
+              </div>
+              <div class="price">$0.10<small>per result</small></div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <div class="proof-band">
+        <div class="shell proof-grid">
+          <div class="proof-item"><strong>Official inputs</strong><p>Versioned U.S. Treasury OFAC files and SEC EDGAR submissions and company facts.</p></div>
+          <div class="proof-item"><strong>Deterministic output</strong><p>Canonical request, source-bundle, component, and result hashes.</p></div>
+          <div class="proof-item"><strong>Replayable receipt</strong><p>Ed25519-signed evidence and paid-result replay bound to the original payment proof.</p></div>
+        </div>
+      </div>
+    </main>
+
+    <footer>
+      <div class="shell footer-row">
+        <span>ITI Studio - Official Source Evidence</span>
+        <span>Exact evidence only. No advice, authorization, or sanctions clearance.</span>
+      </div>
+    </footer>
+  </body>
+</html>

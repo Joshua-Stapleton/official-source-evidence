@@ -102,7 +102,13 @@ def test_mainnet_revenue_cap_blocks_before_route_execution():
 def test_health_and_retired_wedges(client):
     index = client.get("/")
     assert index.status_code == 200
-    assert index.json()["manifest"].endswith("/.well-known/agent-service.json")
+    assert index.headers["content-type"].startswith("text/html")
+    assert "Official Source Evidence" in index.text
+    assert 'href="/.well-known/agent-service.json"' in index.text
+
+    index_json = client.get("/index.json")
+    assert index_json.status_code == 200
+    assert index_json.json()["manifest"].endswith("/.well-known/agent-service.json")
 
     health = client.get("/health")
     assert health.status_code == 200
@@ -135,6 +141,43 @@ def test_agent_manifest_promotes_only_verdict_endpoints(client):
     ]
     assert client.get("/v1/x402/pfas/leads").status_code == 410
     assert client.get("/v1/x402/grid/projects").status_code == 410
+
+
+def test_machine_discovery_and_crawler_surfaces(client):
+    schema = client.get("/openapi.json").json()
+    assert schema["info"]["contact"]["email"] == "joshua@regulavita.com"
+    assert "x402 v2 USDC payment" in schema["info"]["x-guidance"]
+    assert schema["servers"] == [{"url": "http://localhost:8765"}]
+
+    expected = {
+        "/v1/sec/filing-trigger-delta": "0.100000",
+        "/v1/ofac/exact-identifier-evidence": "0.050000",
+    }
+    for path, price in expected.items():
+        operation = schema["paths"][path]["post"]
+        assert operation["x-payment-info"] == {
+            "price": {"mode": "fixed", "currency": "USD", "amount": price},
+            "protocols": [{"x402": {}}],
+        }
+        assert operation["responses"]["402"]["description"] == "Payment Required"
+        assert operation["requestBody"]["content"]["application/json"]["example"]
+
+    assert schema["paths"]["/health"]["get"]["security"] == []
+    assert "/v1/evidence/replay/{request_id}" not in schema["paths"]
+
+    llms = client.get("/llms.txt")
+    assert llms.status_code == 200
+    assert "/v1/ofac/exact-identifier-evidence - $0.05 USDC" in llms.text
+    assert "/v1/sec/filing-trigger-delta - $0.10 USDC" in llms.text
+
+    robots = client.get("/robots.txt")
+    assert robots.status_code == 200
+    assert "Sitemap: http://localhost:8765/sitemap.xml" in robots.text
+
+    icon = client.get("/favicon.ico")
+    assert icon.status_code == 200
+    assert icon.headers["content-type"].startswith("image/png")
+    assert len(icon.content) > 1_000
 
 
 @pytest.mark.parametrize(

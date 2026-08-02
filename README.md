@@ -1,23 +1,71 @@
-# ITI Official Source Evidence API
+# Official Source Evidence
 
-Standalone Fly.io deployment for the experiment selected by the ITI Signal
-autonomous-business research sprint.
+Pay-per-call official-source evidence for autonomous agents. No account, API
+key, subscription, or sales call.
 
-- `POST /v1/sec/filing-trigger-delta` charges `$0.10` USDC.
-- `POST /v1/ofac/exact-identifier-evidence` charges `$0.05` USDC.
-- The production deployment uses Base mainnet and the authenticated CDP x402
-  facilitator, with a hard `$10.00` accepted-revenue cap per UTC day.
+**Live service:** [iti-official-source-evidence.fly.dev](https://iti-official-source-evidence.fly.dev/)
+| [OpenAPI](https://iti-official-source-evidence.fly.dev/openapi.json)
+| [Agent manifest](https://iti-official-source-evidence.fly.dev/.well-known/agent-service.json)
+| [Coinbase Bazaar listing](https://api.cdp.coinbase.com/platform/v2/x402/discovery/merchant?payTo=0x9500075649a70411c81f99c4314f6cff55d12579&limit=100)
 
-The full service contract, controls, source handling, and experiment gates are
-documented in [`autonomous_data_api/README.md`](autonomous_data_api/README.md).
+## Agent-Payable Endpoints
 
-## Deployment
+| Endpoint | Result | Price |
+| --- | --- | ---: |
+| `POST /v1/ofac/exact-identifier-evidence` | Exact OFAC SDN or Consolidated lookup for a crypto address, OFAC UID, or exact name, with versioned source proof | $0.05 USDC |
+| `POST /v1/sec/filing-trigger-delta` | New SEC EDGAR 8-K, 10-Q, or 10-K filings since an accession, plus selected deterministic XBRL fact deltas | $0.10 USDC |
 
-Fly builds `autonomous_data_api/Dockerfile`, mounts the `evidence_data` volume at
-`/data`, and keeps one shared 1 GB machine running. Deployment secrets are set
-in Fly and are never committed to this repository.
+Both routes use x402 v2 on Base mainnet. An x402-compatible client receives a
+standard HTTP 402 challenge, pays USDC, retries automatically, and receives the
+JSON result. The production service has a hard `$10.00` accepted-revenue cap
+per UTC day.
 
-## Validation
+## Discover and Inspect
+
+Search the Coinbase Bazaar from an Agentic Wallet CLI:
+
+```bash
+npx awal@latest x402 bazaar search "OFAC exact identifier evidence"
+```
+
+Inspect the free contracts before paying:
+
+```bash
+curl https://iti-official-source-evidence.fly.dev/v1/ofac/sample
+curl https://iti-official-source-evidence.fly.dev/v1/sec/sample
+curl https://iti-official-source-evidence.fly.dev/llms.txt
+```
+
+An unpaid valid request demonstrates the machine-readable payment challenge:
+
+```bash
+curl -i -X POST \
+  https://iti-official-source-evidence.fly.dev/v1/ofac/exact-identifier-evidence \
+  -H 'Content-Type: application/json' \
+  -d '{"identifier_type":"ofac_uid","identifier":"36","lists":["SDN"]}'
+```
+
+## What a Paid Result Includes
+
+- Official publisher and source-version metadata.
+- Canonical request, source-bundle, component, and result SHA-256 hashes.
+- An Ed25519-signed evidence receipt.
+- Explicit data freshness and parser version.
+- Paid-result replay bound to the original payment proof.
+
+The OFAC route is exact-match evidence only. It is not fuzzy screening,
+ownership/control analysis, sanctions clearance, transaction authorization, or
+legal advice. The SEC route returns factual filing records and deterministic
+deltas, never materiality opinions, valuation, investment advice, or execution
+instructions.
+
+## Operator Documentation
+
+The implementation, source controls, payment flow, deployment configuration,
+operating limits, and experiment gates are documented in
+[`autonomous_data_api/README.md`](autonomous_data_api/README.md).
+
+Validate a checkout with:
 
 ```bash
 PYTHONPATH=. uv run --with-requirements autonomous_data_api/requirements.txt \
@@ -28,23 +76,6 @@ docker build -t official-source-evidence-api:local \
   -f autonomous_data_api/Dockerfile .
 ```
 
-The ignored `.local/testnet-wallets.json` file can be used by the bounded
-purchase check when the target deployment is explicitly configured for Base
-Sepolia:
-
-```bash
-PYTHONPATH=. uv run --with-requirements autonomous_data_api/requirements.txt \
-  python autonomous_data_api/testnet_purchase.py
-```
-
-The runner refuses mainnet and verifies the Base Sepolia network, exact price,
-recipient, and resource URL before signing the payment.
-
-The mainnet discovery bootstrap has a separate runner with an explicit monetary
-arm. It refuses any network, asset, recipient, amount, buyer, or URL mismatch:
-
-```bash
-CONFIRM_MAINNET_BOOTSTRAP_USDC=0.05 PYTHONPATH=. \
-  uv run --with-requirements autonomous_data_api/requirements.txt \
-  python autonomous_data_api/mainnet_bootstrap_purchase.py
-```
+This remains a capped demand experiment. Owner-funded calls prove technical
+settlement and discovery, not independent demand, revenue quality, or a
+validated business.

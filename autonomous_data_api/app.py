@@ -11,12 +11,14 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Any, ClassVar
 from urllib.parse import urlparse
 
 from cdp.auth.utils.jwt import JwtOptions, generate_jwt
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.openapi.utils import get_openapi
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from pydantic import BaseModel, ValidationError
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -65,6 +67,8 @@ X402_FACILITATOR_URL = os.getenv(
 PUBLIC_BASE_URL = os.getenv("AUTONOMOUS_API_BASE_URL", "http://localhost:8765")
 PUBLIC_SCHEME = urlparse(PUBLIC_BASE_URL).scheme
 X402_CDP_API_KEY_ID = os.getenv("CDP_API_KEY_ID", "")
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+SERVICE_ICON_URL = f"{PUBLIC_BASE_URL.rstrip('/')}/icon.png"
 
 
 def load_cdp_api_key_secret() -> str:
@@ -135,11 +139,13 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="Official Source Evidence API",
-    version="0.2.0",
+    version="0.3.0",
     description=(
-        "Deterministic, source-hashed SEC filing deltas and exact OFAC identifier evidence. "
-        "No investment, sanctions-clearance, compliance, or legal conclusions."
+        "Pay-per-call, source-hashed SEC EDGAR filing deltas and exact OFAC "
+        "identifier evidence for autonomous agents. No API keys or subscriptions. "
+        "No investment advice, sanctions clearance, compliance determination, or legal advice."
     ),
+    contact={"name": "ITI Studio", "email": "joshua@regulavita.com"},
     lifespan=lifespan,
 )
 
@@ -214,11 +220,24 @@ x402_routes: dict[str, RouteConfig] = {
         ],
         mime_type="application/json",
         description=(
-            "Return a source-attested deterministic SEC filing event and selected "
-            "XBRL fact delta for one issuer"
+            "Detect new SEC EDGAR 8-K, 10-Q, and 10-K filings since a known "
+            "accession and compute selected XBRL fact deltas. Returns official "
+            "source URLs, hashes, freshness, and a signed evidence receipt; no "
+            "investment advice."
         ),
         service_name="Official Source Evidence",
-        tags=["sec", "edgar", "filing-delta", "xbrl", "source-proof"],
+        tags=[
+            "sec",
+            "edgar",
+            "8-k",
+            "10-q",
+            "10-k",
+            "xbrl",
+            "filing-delta",
+            "filing-change",
+            "source-proof",
+        ],
+        icon_url=SERVICE_ICON_URL,
         extensions=get_discovery_extension(
             method="POST",
             input={
@@ -278,11 +297,23 @@ x402_routes: dict[str, RouteConfig] = {
         ],
         mime_type="application/json",
         description=(
-            "Perform an exact, non-advisory identifier lookup against versioned "
-            "OFAC source data and return source proof"
+            "Run an exact-match OFAC SDN and Consolidated identifier lookup for "
+            "crypto wallets, OFAC UIDs, or exact names. Returns versioned U.S. "
+            "Treasury source hashes and a signed evidence receipt; no fuzzy "
+            "screening or sanctions clearance."
         ),
         service_name="Official Source Evidence",
-        tags=["ofac", "exact-match", "crypto-address", "source-proof", "non-advisory"],
+        tags=[
+            "ofac",
+            "sanctions",
+            "sdn",
+            "wallet-screening",
+            "exact-match",
+            "crypto-address",
+            "compliance-data",
+            "source-proof",
+        ],
+        icon_url=SERVICE_ICON_URL,
         extensions=get_discovery_extension(
             method="POST",
             input={
@@ -643,6 +674,11 @@ def health() -> dict[str, Any]:
 
 
 @app.get("/", include_in_schema=False)
+def service_home() -> FileResponse:
+    return FileResponse(STATIC_DIR / "index.html", media_type="text/html")
+
+
+@app.get("/index.json", include_in_schema=False)
 def service_index() -> dict[str, str]:
     base_url = PUBLIC_BASE_URL.rstrip("/")
     return {
@@ -653,15 +689,70 @@ def service_index() -> dict[str, str]:
     }
 
 
+@app.get("/favicon.ico", include_in_schema=False)
+@app.get("/icon.png", include_in_schema=False)
+def service_icon() -> FileResponse:
+    return FileResponse(
+        STATIC_DIR / "official-source-evidence.png", media_type="image/png"
+    )
+
+
+@app.get("/robots.txt", include_in_schema=False)
+def robots() -> PlainTextResponse:
+    base_url = PUBLIC_BASE_URL.rstrip("/")
+    return PlainTextResponse(
+        f"User-agent: *\nAllow: /\nSitemap: {base_url}/sitemap.xml\n"
+    )
+
+
+@app.get("/sitemap.xml", include_in_schema=False)
+def sitemap() -> Response:
+    base_url = PUBLIC_BASE_URL.rstrip("/")
+    urls = ("/", "/docs", "/openapi.json", "/v1/sec/sample", "/v1/ofac/sample")
+    entries = "".join(f"<url><loc>{base_url}{path}</loc></url>" for path in urls)
+    return Response(
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        f'<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{entries}</urlset>',
+        media_type="application/xml",
+    )
+
+
+@app.get("/llms.txt", include_in_schema=False)
+def llms_txt() -> PlainTextResponse:
+    base_url = PUBLIC_BASE_URL.rstrip("/")
+    return PlainTextResponse(
+        f"""# Official Source Evidence API
+
+Pay-per-call official-source evidence for autonomous agents. No account, API key, or subscription.
+
+## Paid endpoints
+- POST {base_url}/v1/ofac/exact-identifier-evidence - $0.05 USDC on Base via x402 v2. Exact OFAC SDN or Consolidated lookup for a crypto address, OFAC UID, or exact name. Returns source versions, hashes, matches, limitations, and a signed receipt.
+- POST {base_url}/v1/sec/filing-trigger-delta - $0.10 USDC on Base via x402 v2. Detect SEC EDGAR 8-K, 10-Q, or 10-K filings since an accession and return selected deterministic XBRL fact deltas with source proof.
+
+## Machine-readable contracts
+- OpenAPI: {base_url}/openapi.json
+- Agent manifest: {base_url}/.well-known/agent-service.json
+- Interactive docs: {base_url}/docs
+- OFAC sample: {base_url}/v1/ofac/sample
+- SEC sample: {base_url}/v1/sec/sample
+
+## Boundaries
+Exact source evidence only. No fuzzy sanctions screening, sanctions clearance, transaction authorization, materiality opinion, investment advice, or legal advice.
+"""
+    )
+
+
 @app.get("/.well-known/agent-service.json")
 def agent_manifest() -> dict[str, Any]:
     base_url = os.getenv("AUTONOMOUS_API_BASE_URL", "http://localhost:8765").rstrip("/")
     return {
         "name": "Official Source Evidence API",
         "description": (
-            "Deterministic SEC filing deltas and exact OFAC identifier evidence with "
-            "versioned source proof; never advice or clearance."
+            "Pay-per-call SEC EDGAR filing deltas and exact OFAC identifier evidence "
+            "with versioned official-source proof and signed receipts."
         ),
+        "contact": "joshua@regulavita.com",
+        "icon_url": SERVICE_ICON_URL,
         "auth": {"type": "none", "payment": "x402-v2"},
         "payment": {
             "protocol": "x402-v2",
@@ -678,6 +769,7 @@ def agent_manifest() -> dict[str, Any]:
             ),
         },
         "openapi_url": f"{base_url}/openapi.json",
+        "llms_url": f"{base_url}/llms.txt",
         "sample_endpoints": [
             f"{base_url}/v1/sec/sample",
             f"{base_url}/v1/ofac/sample",
@@ -784,7 +876,7 @@ def ofac_exact_identifier_evidence(
     return prepared.result
 
 
-@app.get("/v1/evidence/replay/{request_id}")
+@app.get("/v1/evidence/replay/{request_id}", include_in_schema=False)
 def replay_evidence_result(
     request_id: str,
     payment_signature: str | None = Header(default=None, alias="Payment-Signature"),
@@ -865,3 +957,84 @@ def retired_x402_grid_projects() -> JSONResponse:
     return retired_wedge(
         "Grid lead scoring is not part of the autonomous evidence experiment."
     )
+
+
+def custom_openapi() -> dict[str, Any]:
+    if app.openapi_schema:
+        return app.openapi_schema
+
+    schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+    )
+    schema["servers"] = [{"url": PUBLIC_BASE_URL.rstrip("/")}]
+    schema["info"]["contact"] = {
+        "name": "ITI Studio",
+        "email": "joshua@regulavita.com",
+    }
+    schema["info"]["x-guidance"] = (
+        "Use POST /v1/ofac/exact-identifier-evidence for exact OFAC SDN or "
+        "Consolidated identifier evidence. Use POST /v1/sec/filing-trigger-delta "
+        "to detect SEC EDGAR 8-K, 10-Q, or 10-K filings since a known accession "
+        "and compute selected XBRL fact deltas. Both routes accept automatic x402 "
+        "v2 USDC payment on Base mainnet and require no account or API key."
+    )
+
+    paid_operations: dict[str, dict[str, Any]] = {
+        "/v1/sec/filing-trigger-delta": {
+            "price": f"{price_decimal(X402_SEC_PRICE):.6f}",
+            "example": {
+                "cik": "0000320193",
+                "since_accession": "0000320193-26-000081",
+                "forms": ["8-K", "10-Q", "10-K"],
+                "rules": [
+                    "FORM:8-K:ITEM:2.02",
+                    "XBRL:us-gaap:Revenues",
+                ],
+                "max_source_age_seconds": 600,
+            },
+        },
+        "/v1/ofac/exact-identifier-evidence": {
+            "price": f"{price_decimal(X402_OFAC_PRICE):.6f}",
+            "example": {
+                "identifier_type": "crypto_address",
+                "identifier": "0x0000000000000000000000000000000000000000",
+                "networks": ["eip155:1", "eip155:8453"],
+                "lists": ["SDN", "CONSOLIDATED"],
+            },
+        },
+    }
+    for path, path_item in schema.get("paths", {}).items():
+        for method, operation in path_item.items():
+            if method not in {"get", "post", "put", "patch", "delete", "head"}:
+                continue
+            paid = paid_operations.get(path) if method == "post" else None
+            if paid:
+                operation["security"] = []
+                operation["x-payment-info"] = {
+                    "price": {
+                        "mode": "fixed",
+                        "currency": "USD",
+                        "amount": paid["price"],
+                    },
+                    "protocols": [{"x402": {}}],
+                }
+                operation.setdefault("responses", {})["402"] = {
+                    "description": "Payment Required"
+                }
+                content = (
+                    operation.setdefault("requestBody", {})
+                    .setdefault("content", {})
+                    .setdefault("application/json", {})
+                )
+                content["example"] = paid["example"]
+            else:
+                operation["security"] = []
+
+    app.openapi_schema = schema
+    return schema
+
+
+app.openapi = custom_openapi
