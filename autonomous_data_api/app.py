@@ -1006,13 +1006,16 @@ def custom_openapi() -> dict[str, Any]:
             },
         },
     }
+    sec_properties = schema["components"]["schemas"]["SecDeltaRequest"]["properties"]
+    sec_properties["cik"]["example"] = "0000320193"
+    sec_properties["since_accession"]["example"] = "0000320193-26-000018"
     for path, path_item in schema.get("paths", {}).items():
         for method, operation in path_item.items():
             if method not in {"get", "post", "put", "patch", "delete", "head"}:
                 continue
             paid = paid_operations.get(path) if method == "post" else None
             if paid:
-                operation["security"] = []
+                operation.pop("security", None)
                 operation["x-payment-info"] = {
                     "price": {
                         "mode": "fixed",

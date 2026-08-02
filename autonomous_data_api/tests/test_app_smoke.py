@@ -155,12 +155,17 @@ def test_machine_discovery_and_crawler_surfaces(client):
     }
     for path, price in expected.items():
         operation = schema["paths"][path]["post"]
+        assert "security" not in operation
         assert operation["x-payment-info"] == {
             "price": {"mode": "fixed", "currency": "USD", "amount": price},
             "protocols": [{"x402": {}}],
         }
         assert operation["responses"]["402"]["description"] == "Payment Required"
         assert operation["requestBody"]["content"]["application/json"]["example"]
+
+    sec_properties = schema["components"]["schemas"]["SecDeltaRequest"]["properties"]
+    assert sec_properties["cik"]["example"] == "0000320193"
+    assert sec_properties["since_accession"]["example"] == ("0000320193-26-000018")
 
     assert schema["paths"]["/health"]["get"]["security"] == []
     assert "/v1/evidence/replay/{request_id}" not in schema["paths"]
