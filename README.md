@@ -39,3 +39,12 @@ PYTHONPATH=. uv run --with-requirements autonomous_data_api/requirements.txt \
 
 The runner refuses mainnet and verifies the Base Sepolia network, exact price,
 recipient, and resource URL before signing the payment.
+
+The mainnet discovery bootstrap has a separate runner with an explicit monetary
+arm. It refuses any network, asset, recipient, amount, buyer, or URL mismatch:
+
+```bash
+CONFIRM_MAINNET_BOOTSTRAP_USDC=0.05 PYTHONPATH=. \
+  uv run --with-requirements autonomous_data_api/requirements.txt \
+  python autonomous_data_api/mainnet_bootstrap_purchase.py
+```
