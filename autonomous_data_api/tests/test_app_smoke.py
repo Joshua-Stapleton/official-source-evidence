@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+from decimal import Decimal
 
 os.environ.setdefault("AUTONOMOUS_EVIDENCE_BACKGROUND_REFRESH", "0")
 os.environ.setdefault(
@@ -17,9 +18,16 @@ import jwt
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
-from autonomous_data_api.app import CdpFacilitatorAuthProvider, app, evidence_service
+from autonomous_data_api.app import (
+    CdpFacilitatorAuthProvider,
+    MainnetRevenueCapMiddleware,
+    app,
+    evidence_service,
+)
 from autonomous_data_api.evidence import PreparedResult, SourceStaleError
 
 
@@ -52,6 +60,33 @@ def decode_challenge(response):
     encoded = response.headers["payment-required"]
     encoded += "=" * (-len(encoded) % 4)
     return json.loads(base64.urlsafe_b64decode(encoded))
+
+
+def test_mainnet_revenue_cap_blocks_before_route_execution():
+    class StubService:
+        @staticmethod
+        def fulfilled_revenue_since(_timestamp_utc, _network):
+            return Decimal("9.95")
+
+    limited_app = FastAPI()
+
+    @limited_app.post("/paid")
+    def paid():
+        return JSONResponse({"ok": True})
+
+    limited_app.add_middleware(
+        MainnetRevenueCapMiddleware,
+        service=StubService(),
+        network="eip155:8453",
+        daily_cap=Decimal("10.00"),
+        route_prices={("POST", "/paid"): Decimal("0.10")},
+    )
+    with TestClient(limited_app) as limited_client:
+        response = limited_client.post("/paid")
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "DAILY_REVENUE_CAP_REACHED"
+    assert int(response.headers["retry-after"]) > 0
 
 
 def test_health_and_retired_wedges(client):

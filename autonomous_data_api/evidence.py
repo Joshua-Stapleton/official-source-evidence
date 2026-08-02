@@ -13,6 +13,7 @@ import unicodedata
 import zlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -1456,3 +1457,23 @@ class EvidenceService:
                 "establish independent demand."
             ),
         }
+
+    def fulfilled_revenue_since(self, timestamp_utc: str, network: str) -> Decimal:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT quoted_price
+                FROM evidence_attempts
+                WHERE timestamp_utc >= ?
+                  AND network = ?
+                  AND response_status = 'FULFILLED'
+                """,
+                (timestamp_utc, network),
+            ).fetchall()
+        total = Decimal(0)
+        for row in rows:
+            try:
+                total += Decimal(row["quoted_price"].removeprefix("$"))
+            except (InvalidOperation, AttributeError):
+                continue
+        return total

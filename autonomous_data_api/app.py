@@ -9,7 +9,8 @@ import os
 import sqlite3
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any, ClassVar
 from urllib.parse import urlparse
 
@@ -47,6 +48,12 @@ X402_PAY_TO_CONFIGURED = bool(os.getenv("AUTONOMOUS_X402_PAY_TO"))
 X402_PAY_TO = os.getenv("AUTONOMOUS_X402_PAY_TO", X402_TEST_RECIPIENT)
 X402_SEC_PRICE = os.getenv("AUTONOMOUS_X402_SEC_PRICE", "$0.10")
 X402_OFAC_PRICE = os.getenv("AUTONOMOUS_X402_OFAC_PRICE", "$0.05")
+try:
+    X402_DAILY_REVENUE_CAP_USD = Decimal(
+        os.getenv("AUTONOMOUS_X402_DAILY_REVENUE_CAP_USD", "0")
+    )
+except InvalidOperation as exc:
+    raise RuntimeError("AUTONOMOUS_X402_DAILY_REVENUE_CAP_USD must be numeric") from exc
 X402_FACILITATOR_URL = os.getenv(
     "AUTONOMOUS_X402_FACILITATOR_URL",
     (
@@ -530,6 +537,71 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
 app.add_middleware(EvidencePrecomputeMiddleware, service=evidence_service)
 
 
+class MainnetRevenueCapMiddleware(BaseHTTPMiddleware):
+    def __init__(
+        self,
+        app: Any,
+        *,
+        service: EvidenceService,
+        network: str,
+        daily_cap: Decimal,
+        route_prices: dict[tuple[str, str], Decimal],
+    ) -> None:
+        super().__init__(app)
+        self.service = service
+        self.network = network
+        self.daily_cap = daily_cap
+        self.route_prices = route_prices
+        self.lock = asyncio.Lock()
+
+    async def dispatch(self, request: Request, call_next: Any):
+        price = self.route_prices.get((request.method, request.url.path))
+        if self.network != "eip155:8453" or self.daily_cap <= 0 or price is None:
+            return await call_next(request)
+
+        async with self.lock:
+            now = datetime.now(timezone.utc)
+            day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            fulfilled = await run_in_threadpool(
+                self.service.fulfilled_revenue_since,
+                day_start.isoformat(),
+                self.network,
+            )
+            if fulfilled + price > self.daily_cap:
+                next_day = day_start + timedelta(days=1)
+                retry_after = max(1, int((next_day - now).total_seconds()))
+                return JSONResponse(
+                    status_code=503,
+                    headers={"Retry-After": str(retry_after)},
+                    content={
+                        "error": {
+                            "code": "DAILY_REVENUE_CAP_REACHED",
+                            "detail": "Mainnet sales resume at 00:00 UTC",
+                        }
+                    },
+                )
+            return await call_next(request)
+
+
+def price_decimal(value: str) -> Decimal:
+    try:
+        return Decimal(value.removeprefix("$"))
+    except InvalidOperation as exc:
+        raise RuntimeError(f"Invalid x402 price: {value}") from exc
+
+
+app.add_middleware(
+    MainnetRevenueCapMiddleware,
+    service=evidence_service,
+    network=X402_NETWORK,
+    daily_cap=X402_DAILY_REVENUE_CAP_USD,
+    route_prices={
+        ("POST", "/v1/sec/filing-trigger-delta"): price_decimal(X402_SEC_PRICE),
+        ("POST", "/v1/ofac/exact-identifier-evidence"): price_decimal(X402_OFAC_PRICE),
+    },
+)
+
+
 @app.get("/health")
 def health() -> dict[str, Any]:
     return {
@@ -539,6 +611,11 @@ def health() -> dict[str, Any]:
             "network": X402_NETWORK,
             "prices": {"sec_delta": X402_SEC_PRICE, "ofac_exact": X402_OFAC_PRICE},
             "revenue_ready": X402_REVENUE_READY,
+            "daily_revenue_cap_usd": (
+                f"${X402_DAILY_REVENUE_CAP_USD:.2f}"
+                if X402_DAILY_REVENUE_CAP_USD > 0
+                else None
+            ),
             "mode": (
                 "base-mainnet"
                 if X402_REVENUE_READY
@@ -579,6 +656,11 @@ def agent_manifest() -> dict[str, Any]:
                 "/v1/ofac/exact-identifier-evidence": X402_OFAC_PRICE,
             },
             "revenue_ready": X402_REVENUE_READY,
+            "daily_revenue_cap_usd": (
+                f"${X402_DAILY_REVENUE_CAP_USD:.2f}"
+                if X402_DAILY_REVENUE_CAP_USD > 0
+                else None
+            ),
         },
         "openapi_url": f"{base_url}/openapi.json",
         "sample_endpoints": [

@@ -139,9 +139,9 @@ fly secrets set \
   AUTONOMOUS_ANALYTICS_HMAC_KEY='long-random-secret'
 ```
 
-The final `fly deploy --config autonomous_data_api/fly.toml` step is intentionally
-held back until the receiving address, production facilitator credentials,
-owner-wallet exclusions, and South African mainnet advice are confirmed.
+The live Fly deployment uses Base mainnet, the authenticated CDP facilitator,
+an owner-controlled receiving address, and a `$10.00` UTC-day revenue cap.
+Production credentials are stored only as Fly secrets.
 
 ## Automated Controls
 
@@ -154,6 +154,7 @@ owner-wallet exclusions, and South African mainnet advice are confirmed.
 - Ed25519 result receipts.
 - Stored fulfilments and payment-proof replay.
 - Owner/test classification and HMAC wallet analytics.
+- Pre-payment Base-mainnet revenue cap, serialized on the single Fly machine.
 - `AUTONOMOUS_EVIDENCE_ENABLED=0` kill switch for new paid requests; replay remains available.
 
 Host-level WAF, per-IP/per-wallet/per-ASN rate limits, alerting, backups, and daily chain/facilitator reconciliation remain deployment tasks.
@@ -164,12 +165,12 @@ Continue after 30 days only if all sprint gates pass, including 5 non-owner paye
 
 Kill at Day 21 if the correctly indexed service has zero non-owner paid wallets. Do not extend automatically at Day 31.
 
-## Accounts and Advice Needed Before Mainnet
+## Mainnet Operating Requirements
 
-- A Coinbase Developer Platform account and secret API key for the production facilitator.
-- A Base-compatible receiving wallet address. Never provide its private key to this app or repository.
-- A public container host, persistent database/object storage, domain/DNS/TLS, and secret manager.
-- Written South African tax and exchange-control advice for receiving USDC directly as payment for exported automated digital services and converting it through a compliant channel.
-- A current VAT/accounting decision for invoices, buyer-location evidence, valuation, and recordkeeping.
+- Keep the CDP key in Fly secrets and rotate it if the downloaded copy is exposed.
+- Keep the Base receiving wallet recovery material outside the app and repository.
+- Reconcile fulfilled receipts against Base settlement transactions and wallet balances.
+- Keep tax, VAT, buyer-location, valuation, and exchange-control records current.
+- Keep the initial revenue cap in place until the small-amount operating phase is reviewed.
 
 No SEC or OFAC account or API key is required.
