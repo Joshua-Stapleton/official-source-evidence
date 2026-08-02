@@ -55,6 +55,10 @@ def decode_challenge(response):
 
 
 def test_health_and_retired_wedges(client):
+    index = client.get("/")
+    assert index.status_code == 200
+    assert index.json()["manifest"].endswith("/.well-known/agent-service.json")
+
     health = client.get("/health")
     assert health.status_code == 200
     assert health.json()["x402"]["network"] == "eip155:84532"

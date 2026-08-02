@@ -55,6 +55,8 @@ X402_FACILITATOR_URL = os.getenv(
         else "https://x402.org/facilitator"
     ),
 )
+PUBLIC_BASE_URL = os.getenv("AUTONOMOUS_API_BASE_URL", "http://localhost:8765")
+PUBLIC_SCHEME = urlparse(PUBLIC_BASE_URL).scheme
 X402_CDP_API_KEY_ID = os.getenv("CDP_API_KEY_ID", "")
 X402_CDP_API_KEY_SECRET = os.getenv("CDP_API_KEY_SECRET", "")
 X402_USES_CDP_FACILITATOR = (
@@ -386,6 +388,8 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
         return True
 
     async def dispatch(self, request: Request, call_next: Any) -> Any:
+        if PUBLIC_SCHEME in {"http", "https"}:
+            request.scope["scheme"] = PUBLIC_SCHEME
         route = self.ROUTES.get(request.url.path)
         if request.method != "POST" or route is None:
             return await call_next(request)
@@ -543,6 +547,17 @@ def health() -> dict[str, Any]:
                 else "testnet-demo-recipient"
             ),
         },
+    }
+
+
+@app.get("/", include_in_schema=False)
+def service_index() -> dict[str, str]:
+    base_url = PUBLIC_BASE_URL.rstrip("/")
+    return {
+        "name": "Official Source Evidence API",
+        "health": f"{base_url}/health",
+        "docs": f"{base_url}/docs",
+        "manifest": f"{base_url}/.well-known/agent-service.json",
     }
 
 
