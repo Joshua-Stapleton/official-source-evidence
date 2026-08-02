@@ -65,7 +65,22 @@ X402_FACILITATOR_URL = os.getenv(
 PUBLIC_BASE_URL = os.getenv("AUTONOMOUS_API_BASE_URL", "http://localhost:8765")
 PUBLIC_SCHEME = urlparse(PUBLIC_BASE_URL).scheme
 X402_CDP_API_KEY_ID = os.getenv("CDP_API_KEY_ID", "")
-X402_CDP_API_KEY_SECRET = os.getenv("CDP_API_KEY_SECRET", "")
+
+
+def load_cdp_api_key_secret() -> str:
+    raw = os.getenv("CDP_API_KEY_SECRET", "")
+    if raw:
+        return raw
+    encoded = os.getenv("CDP_API_KEY_SECRET_B64", "")
+    if not encoded:
+        return ""
+    try:
+        return base64.b64decode(encoded, validate=True).decode("utf-8")
+    except (ValueError, UnicodeDecodeError, binascii.Error) as exc:
+        raise RuntimeError("CDP_API_KEY_SECRET_B64 is not valid base64 UTF-8") from exc
+
+
+X402_CDP_API_KEY_SECRET = load_cdp_api_key_secret()
 X402_USES_CDP_FACILITATOR = (
     urlparse(X402_FACILITATOR_URL).hostname == "api.cdp.coinbase.com"
 )

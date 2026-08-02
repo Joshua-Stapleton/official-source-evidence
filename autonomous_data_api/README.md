@@ -132,7 +132,7 @@ fly volumes create evidence_data --region iad --size 1
 fly secrets set \
   AUTONOMOUS_X402_PAY_TO=0xYourReceivingWallet \
   CDP_API_KEY_ID='organizations/.../apiKeys/...' \
-  CDP_API_KEY_SECRET='your-secret' \
+  CDP_API_KEY_SECRET_B64='base64-encoded-secret' \
   AUTONOMOUS_SEC_USER_AGENT='OfficialSourceEvidence/0.2 YourOrg contact@example.com' \
   AUTONOMOUS_OWNER_WALLETS='0xOwnerWallet,0xBootstrapWallet' \
   AUTONOMOUS_RECEIPT_SIGNING_KEY='base64url-key' \

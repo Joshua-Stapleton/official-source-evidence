@@ -27,6 +27,7 @@ from autonomous_data_api.app import (
     MainnetRevenueCapMiddleware,
     app,
     evidence_service,
+    load_cdp_api_key_secret,
 )
 from autonomous_data_api.evidence import PreparedResult, SourceStaleError
 
@@ -60,6 +61,15 @@ def decode_challenge(response):
     encoded = response.headers["payment-required"]
     encoded += "=" * (-len(encoded) % 4)
     return json.loads(base64.urlsafe_b64decode(encoded))
+
+
+def test_cdp_secret_can_be_loaded_from_base64(monkeypatch):
+    monkeypatch.delenv("CDP_API_KEY_SECRET", raising=False)
+    monkeypatch.setenv(
+        "CDP_API_KEY_SECRET_B64",
+        base64.b64encode(b"private-key-material").decode("ascii"),
+    )
+    assert load_cdp_api_key_secret() == "private-key-material"
 
 
 def test_mainnet_revenue_cap_blocks_before_route_execution():
