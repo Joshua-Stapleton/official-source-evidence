@@ -23,7 +23,7 @@ EXPECTED_ASSET = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 PRODUCTS = {
     "ofac": {
         "endpoint": (
-            "https://evidence.iti-studio.ai/v1/ofac/exact-identifier-evidence"
+            "https://evidence.regulavita.com/v1/ofac/exact-identifier-evidence"
         ),
         "amount_atomic": "50000",
         "arm_value": "0.05",
@@ -35,7 +35,7 @@ PRODUCTS = {
         },
     },
     "sec": {
-        "endpoint": "https://evidence.iti-studio.ai/v1/sec/filing-trigger-delta",
+        "endpoint": "https://evidence.regulavita.com/v1/sec/filing-trigger-delta",
         "amount_atomic": "100000",
         "arm_value": "0.10",
         "payload": {

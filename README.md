@@ -3,9 +3,9 @@
 Pay-per-call official-source evidence for autonomous agents. No account, API
 key, subscription, or sales call.
 
-**Live service:** [evidence.iti-studio.ai](https://evidence.iti-studio.ai/)
-| [OpenAPI](https://evidence.iti-studio.ai/openapi.json)
-| [Agent manifest](https://evidence.iti-studio.ai/.well-known/agent-service.json)
+**Live service:** [evidence.regulavita.com](https://evidence.regulavita.com/)
+| [OpenAPI](https://evidence.regulavita.com/openapi.json)
+| [Agent manifest](https://evidence.regulavita.com/.well-known/agent-service.json)
 | [Coinbase Bazaar listing](https://api.cdp.coinbase.com/platform/v2/x402/discovery/merchant?payTo=0x9500075649a70411c81f99c4314f6cff55d12579&limit=100)
 
 ## Agent-Payable Endpoints
@@ -36,16 +36,16 @@ npx awal@latest x402 bazaar search "OFAC exact identifier evidence"
 Inspect the free contracts before paying:
 
 ```bash
-curl https://evidence.iti-studio.ai/v1/ofac/sample
-curl https://evidence.iti-studio.ai/v1/sec/sample
-curl https://evidence.iti-studio.ai/llms.txt
+curl https://evidence.regulavita.com/v1/ofac/sample
+curl https://evidence.regulavita.com/v1/sec/sample
+curl https://evidence.regulavita.com/llms.txt
 ```
 
 An unpaid valid request demonstrates the machine-readable payment challenge:
 
 ```bash
 curl -i -X POST \
-  https://evidence.iti-studio.ai/v1/ofac/exact-identifier-evidence \
+  https://evidence.regulavita.com/v1/ofac/exact-identifier-evidence \
   -H 'Content-Type: application/json' \
   -d '{"identifier_type":"ofac_uid","identifier":"36","lists":["SDN"]}'
 ```

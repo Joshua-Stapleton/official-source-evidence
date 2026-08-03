@@ -5,7 +5,7 @@ primary_region = "iad"
   dockerfile = "autonomous_data_api/Dockerfile"
 
 [env]
-  AUTONOMOUS_API_BASE_URL = "https://evidence.iti-studio.ai"
+  AUTONOMOUS_API_BASE_URL = "https://evidence.regulavita.com"
   AUTONOMOUS_EVIDENCE_BACKGROUND_REFRESH = "1"
   AUTONOMOUS_EVIDENCE_DB_PATH = "/data/evidence.sqlite3"
   AUTONOMOUS_EVIDENCE_ENABLED = "1"
