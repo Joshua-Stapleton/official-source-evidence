@@ -20,6 +20,11 @@ standard HTTP 402 challenge, pays USDC, retries automatically, and receives the
 JSON result. The production service has a hard `$10.00` accepted-revenue cap
 per UTC day.
 
+Monitoring tools may send an empty unauthenticated `POST` to either paid route.
+The service treats that as the published example request and returns the normal
+HTTP 402 challenge without charging. Non-empty malformed or schema-invalid
+requests are still rejected before payment.
+
 ## Discover and Inspect
 
 Search the Coinbase Bazaar from an Agentic Wallet CLI:

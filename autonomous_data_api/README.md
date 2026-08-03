@@ -25,6 +25,12 @@ The OFAC endpoint performs only exact normalized lookups for a supplied crypto a
 6. The already prepared result is returned with an Ed25519 receipt and source hashes.
 7. A fulfilled buyer can replay the stored result with the original `Payment-Signature` at `/v1/evidence/replay/{request_id}` without a second charge.
 
+For directory and uptime monitoring, an empty unauthenticated `POST` is a
+supported probe for both paid routes. It uses the route's published Bazaar
+example request and returns the normal 402 challenge. A literal `{}`, malformed
+JSON, or any other schema-invalid non-empty body is still rejected before the
+payment layer.
+
 Every attempt is written to a reconciliation ledger. Testnet and configured owner-wallet traffic are explicitly excluded from independent-demand interpretation.
 
 ## Local Run

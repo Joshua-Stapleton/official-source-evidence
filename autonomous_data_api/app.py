@@ -69,6 +69,19 @@ PUBLIC_SCHEME = urlparse(PUBLIC_BASE_URL).scheme
 X402_CDP_API_KEY_ID = os.getenv("CDP_API_KEY_ID", "")
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 SERVICE_ICON_URL = f"{PUBLIC_BASE_URL.rstrip('/')}/icon.png"
+SEC_PROBE_PAYLOAD = {
+    "cik": "0000320193",
+    "since_accession": "0000320193-26-000018",
+    "forms": ["8-K", "10-Q", "10-K"],
+    "rules": ["FORM:8-K:ITEM:2.02", "XBRL:us-gaap:Revenues"],
+    "max_source_age_seconds": 600,
+}
+OFAC_PROBE_PAYLOAD = {
+    "identifier_type": "crypto_address",
+    "identifier": "0x0000000000000000000000000000000000000000",
+    "networks": ["eip155:1", "eip155:8453"],
+    "lists": ["SDN", "CONSOLIDATED"],
+}
 
 
 def load_cdp_api_key_secret() -> str:
@@ -139,7 +152,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="Official Source Evidence API",
-    version="0.3.0",
+    version="0.3.1",
     description=(
         "Pay-per-call, source-hashed SEC EDGAR filing deltas and exact OFAC "
         "identifier evidence for autonomous agents. No API keys or subscriptions. "
@@ -240,13 +253,7 @@ x402_routes: dict[str, RouteConfig] = {
         icon_url=SERVICE_ICON_URL,
         extensions=get_discovery_extension(
             method="POST",
-            input={
-                "cik": "0000320193",
-                "since_accession": "0000320193-26-000018",
-                "forms": ["8-K", "10-Q", "10-K"],
-                "rules": ["FORM:8-K:ITEM:2.02", "XBRL:us-gaap:Revenues"],
-                "max_source_age_seconds": 600,
-            },
+            input=SEC_PROBE_PAYLOAD,
             input_schema={
                 "type": "object",
                 "properties": {
@@ -316,12 +323,7 @@ x402_routes: dict[str, RouteConfig] = {
         icon_url=SERVICE_ICON_URL,
         extensions=get_discovery_extension(
             method="POST",
-            input={
-                "identifier_type": "crypto_address",
-                "identifier": "0x0000000000000000000000000000000000000000",
-                "networks": ["eip155:1", "eip155:8453"],
-                "lists": ["SDN", "CONSOLIDATED"],
-            },
+            input=OFAC_PROBE_PAYLOAD,
             input_schema={
                 "type": "object",
                 "properties": {
@@ -390,16 +392,18 @@ def find_wallet(value: Any) -> str | None:
 
 
 class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
-    ROUTES: ClassVar[dict[str, tuple[type[BaseModel], str, str]]] = {
+    ROUTES: ClassVar[dict[str, tuple[type[BaseModel], str, str, dict[str, Any]]]] = {
         "/v1/sec/filing-trigger-delta": (
             SecDeltaRequest,
             "prepare_sec",
             X402_SEC_PRICE,
+            SEC_PROBE_PAYLOAD,
         ),
         "/v1/ofac/exact-identifier-evidence": (
             OfacExactRequest,
             "prepare_ofac",
             X402_OFAC_PRICE,
+            OFAC_PROBE_PAYLOAD,
         ),
     }
 
@@ -479,17 +483,24 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
                 },
             )
 
-        model_class, prepare_method_name, quoted_price = route
+        model_class, prepare_method_name, quoted_price, probe_payload = route
         started = time.monotonic()
-        try:
-            payload = await request.json()
-        except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "error": {"code": "INVALID_JSON", "detail": "Body must be JSON"}
-                },
-            )
+        body = await request.body()
+        if not body:
+            payload = probe_payload
+        else:
+            try:
+                payload = json.loads(body)
+            except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": {
+                            "code": "INVALID_JSON",
+                            "detail": "Body must be JSON",
+                        }
+                    },
+                )
         if len(json.dumps(payload, separators=(",", ":")).encode("utf-8")) > 8192:
             return JSONResponse(
                 status_code=413,
@@ -855,7 +866,7 @@ def ofac_sample() -> dict[str, Any]:
 
 @app.post("/v1/sec/filing-trigger-delta")
 def sec_filing_trigger_delta(
-    payload: SecDeltaRequest, request: Request
+    request: Request, payload: SecDeltaRequest | None = None
 ) -> dict[str, Any]:
     del payload
     prepared: PreparedResult | None = getattr(request.state, "evidence_prepared", None)
@@ -866,8 +877,8 @@ def sec_filing_trigger_delta(
 
 @app.post("/v1/ofac/exact-identifier-evidence")
 def ofac_exact_identifier_evidence(
-    payload: OfacExactRequest,
     request: Request,
+    payload: OfacExactRequest | None = None,
 ) -> dict[str, Any]:
     del payload
     prepared: PreparedResult | None = getattr(request.state, "evidence_prepared", None)
@@ -979,31 +990,19 @@ def custom_openapi() -> dict[str, Any]:
         "Consolidated identifier evidence. Use POST /v1/sec/filing-trigger-delta "
         "to detect SEC EDGAR 8-K, 10-Q, or 10-K filings since a known accession "
         "and compute selected XBRL fact deltas. Both routes accept automatic x402 "
-        "v2 USDC payment on Base mainnet and require no account or API key."
+        "v2 USDC payment on Base mainnet and require no account or API key. "
+        "An empty POST is a supported monitoring probe and returns the same 402 "
+        "challenge using the published example request."
     )
 
     paid_operations: dict[str, dict[str, Any]] = {
         "/v1/sec/filing-trigger-delta": {
             "price": f"{price_decimal(X402_SEC_PRICE):.6f}",
-            "example": {
-                "cik": "0000320193",
-                "since_accession": "0000320193-26-000018",
-                "forms": ["8-K", "10-Q", "10-K"],
-                "rules": [
-                    "FORM:8-K:ITEM:2.02",
-                    "XBRL:us-gaap:Revenues",
-                ],
-                "max_source_age_seconds": 600,
-            },
+            "example": SEC_PROBE_PAYLOAD,
         },
         "/v1/ofac/exact-identifier-evidence": {
             "price": f"{price_decimal(X402_OFAC_PRICE):.6f}",
-            "example": {
-                "identifier_type": "crypto_address",
-                "identifier": "0x0000000000000000000000000000000000000000",
-                "networks": ["eip155:1", "eip155:8453"],
-                "lists": ["SDN", "CONSOLIDATED"],
-            },
+            "example": OFAC_PROBE_PAYLOAD,
         },
     }
     sec_properties = schema["components"]["schemas"]["SecDeltaRequest"]["properties"]
@@ -1026,6 +1025,11 @@ def custom_openapi() -> dict[str, Any]:
                 }
                 operation.setdefault("responses", {})["402"] = {
                     "description": "Payment Required"
+                }
+                operation["x-monitoring-probe"] = {
+                    "method": "POST",
+                    "body": "omitted",
+                    "expected_status": 402,
                 }
                 content = (
                     operation.setdefault("requestBody", {})

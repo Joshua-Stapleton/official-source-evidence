@@ -162,6 +162,12 @@ def test_machine_discovery_and_crawler_surfaces(client):
         }
         assert operation["responses"]["402"]["description"] == "Payment Required"
         assert operation["requestBody"]["content"]["application/json"]["example"]
+        assert operation["requestBody"].get("required", False) is False
+        assert operation["x-monitoring-probe"] == {
+            "method": "POST",
+            "body": "omitted",
+            "expected_status": 402,
+        }
 
     sec_properties = schema["components"]["schemas"]["SecDeltaRequest"]["properties"]
     assert sec_properties["cik"]["example"] == "0000320193"
@@ -231,6 +237,45 @@ def test_verdict_routes_advertise_payment_and_bazaar_post_schema(
     assert challenge["resource"]["serviceName"] == "Official Source Evidence"
     assert expected_tag in challenge["resource"]["tags"]
     assert challenge["extensions"]["bazaar"]["info"]["input"]["method"] == "POST"
+
+
+@pytest.mark.parametrize(
+    ("path", "expected_amount"),
+    [
+        ("/v1/sec/filing-trigger-delta", "100000"),
+        ("/v1/ofac/exact-identifier-evidence", "50000"),
+    ],
+)
+def test_empty_post_is_a_monitorable_payment_probe(
+    client, prepared, path, expected_amount
+):
+    response = client.post(path)
+
+    assert response.status_code == 402
+    assert response.headers["x-evidence-request-id"].endswith("_fixture")
+    challenge = decode_challenge(response)
+    assert challenge["accepts"][0]["amount"] == expected_amount
+    assert challenge["resource"]["url"].endswith(path)
+
+
+def test_nonempty_invalid_json_is_still_rejected_before_payment(client):
+    response = client.post(
+        "/v1/ofac/exact-identifier-evidence",
+        content=b"not-json",
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 400
+    assert "payment-required" not in response.headers
+    assert response.json()["error"]["code"] == "INVALID_JSON"
+
+
+def test_empty_json_object_is_still_rejected_before_payment(client):
+    response = client.post("/v1/ofac/exact-identifier-evidence", json={})
+
+    assert response.status_code == 422
+    assert "payment-required" not in response.headers
+    assert response.json()["error"]["code"] == "INVALID_INPUT"
 
 
 def test_invalid_input_is_rejected_before_payment(client):
