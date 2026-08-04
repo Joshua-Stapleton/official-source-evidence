@@ -2,6 +2,9 @@
 
 This is the implementation of the 1 August 2026 autonomous-business sprint verdict. It is a deliberately capped falsification experiment, not a validated business.
 
+The pre-registered Form D hypothesis, gates, launch evidence, and directory log
+are in [`FORM_D_EXPERIMENT.md`](FORM_D_EXPERIMENT.md).
+
 Paid candidates:
 
 - `POST /v1/gtm/form-d-funding-leads` at `$0.05` USDC per fulfilled call.

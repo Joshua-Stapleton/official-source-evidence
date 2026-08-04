@@ -5,8 +5,10 @@ import asyncio
 import base64
 import json
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from eth_account import Account
@@ -21,6 +23,25 @@ EXPECTED_PAY_TO = "0x9500075649a70411c81f99c4314f6cff55d12579"
 EXPECTED_BUYER = "0x5Bd70c14C517dffC1bB3361274093A791306Ccdd"
 EXPECTED_ASSET = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 PRODUCTS = {
+    "form_d": {
+        "endpoint": ("https://evidence.regulavita.com/v1/gtm/form-d-funding-leads"),
+        "amount_atomic": "50000",
+        "arm_value": "0.05",
+        "payload": {
+            "since": (
+                (datetime.now(timezone.utc) - timedelta(days=3))
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z")
+            ),
+            "states": [],
+            "industry_keywords": [],
+            "minimum_amount_sold_usd": "100000",
+            "include_amendments": False,
+            "limit": 3,
+            "max_source_age_seconds": 600,
+        },
+    },
     "ofac": {
         "endpoint": (
             "https://evidence.regulavita.com/v1/ofac/exact-identifier-evidence"
@@ -104,9 +125,19 @@ async def main() -> None:
             f"{product['arm_value']} to authorize one {args.product} payment"
         )
 
+    request_endpoint = product["endpoint"]
+    request_headers: dict[str, str] = {}
+    ingress_origin = os.getenv("MAINNET_BOOTSTRAP_INGRESS_ORIGIN", "").strip()
+    if ingress_origin:
+        canonical = urlparse(product["endpoint"])
+        request_endpoint = f"{ingress_origin.rstrip('/')}{canonical.path}"
+        request_headers["Host"] = canonical.netloc
+
     async with httpx.AsyncClient(timeout=90) as preflight:
         challenge_response = await preflight.post(
-            product["endpoint"], json=product["payload"]
+            request_endpoint,
+            json=product["payload"],
+            headers=request_headers,
         )
     if challenge_response.status_code != 402:
         raise RuntimeError(
@@ -124,7 +155,11 @@ async def main() -> None:
     register_exact_evm_client(client, EthAccountSigner(account))
     payment_client = x402HTTPClient(client)
     async with x402HttpxClient(client, timeout=120) as http:
-        response = await http.post(product["endpoint"], json=product["payload"])
+        response = await http.post(
+            request_endpoint,
+            json=product["payload"],
+            headers=request_headers,
+        )
         await response.aread()
         if not response.is_success:
             raise RuntimeError(
@@ -147,6 +182,8 @@ async def main() -> None:
                 "product": args.product,
                 "buyer": account.address,
                 "request_id": result.get("request_id"),
+                "decision": result.get("decision"),
+                "lead_count": result.get("lead_count"),
                 "match_status": result.get("match_status"),
                 "result_sha256": result.get("provenance", {}).get("result_sha256"),
                 "settlement": (
