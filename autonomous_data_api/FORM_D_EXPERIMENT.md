@@ -53,8 +53,8 @@ Live measurements are exposed at
 
 ## Distribution Log
 
-- Coinbase CDP Bazaar: discovery metadata declared; first settlement completed;
-  catalog indexing is asynchronous.
+- Coinbase CDP Bazaar: indexed after the first settlement. Live hybrid search
+  for `SEC Form D funding sales trigger` returns the endpoint at `$0.05`.
 - x402scan: all 13 OpenAPI resources registered successfully. Merchant page:
   `https://www.x402scan.com/server/2c8e6e59-5abe-4272-a1ed-856919983c84`.
 - 402.ad: Form D endpoint submitted for review through the free provider form.
