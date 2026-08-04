@@ -54,7 +54,15 @@ def prepared(monkeypatch):
         )
 
     monkeypatch.setattr(evidence_service, "prepare_sec", lambda _: make("sec"))
+    monkeypatch.setattr(
+        evidence_service, "prepare_sec_signal", lambda _: make("sec_signal")
+    )
     monkeypatch.setattr(evidence_service, "prepare_ofac", lambda _: make("ofac"))
+    monkeypatch.setattr(
+        evidence_service,
+        "prepare_ofac_preflight",
+        lambda _: make("ofac_preflight"),
+    )
 
 
 def decode_challenge(response):
@@ -114,6 +122,8 @@ def test_health_and_retired_wedges(client):
     assert health.status_code == 200
     assert health.json()["x402"]["network"] == "eip155:84532"
     assert health.json()["x402"]["prices"] == {
+        "ofac_preflight": "$0.01",
+        "sec_signal": "$0.01",
         "sec_delta": "$0.10",
         "ofac_exact": "$0.05",
     }
@@ -136,6 +146,8 @@ def test_agent_manifest_promotes_only_verdict_endpoints(client):
     assert payload["openapi_url"].endswith("/openapi.json")
     assert payload["payment"]["protocol"] == "x402-v2"
     assert payload["agent_paid_endpoints"] == [
+        "http://localhost:8765/v1/ofac/payment-preflight",
+        "http://localhost:8765/v1/sec/filing-change-signal",
         "http://localhost:8765/v1/sec/filing-trigger-delta",
         "http://localhost:8765/v1/ofac/exact-identifier-evidence",
     ]
@@ -150,6 +162,8 @@ def test_machine_discovery_and_crawler_surfaces(client):
     assert schema["servers"] == [{"url": "http://localhost:8765"}]
 
     expected = {
+        "/v1/ofac/payment-preflight": "0.010000",
+        "/v1/sec/filing-change-signal": "0.010000",
         "/v1/sec/filing-trigger-delta": "0.100000",
         "/v1/ofac/exact-identifier-evidence": "0.050000",
     }
@@ -171,13 +185,17 @@ def test_machine_discovery_and_crawler_surfaces(client):
 
     sec_properties = schema["components"]["schemas"]["SecDeltaRequest"]["properties"]
     assert sec_properties["cik"]["example"] == "0000320193"
+    assert sec_properties["ticker"]["example"] == "AAPL"
     assert sec_properties["since_accession"]["example"] == ("0000320193-26-000018")
+    assert sec_properties["since"]["example"] == "2026-07-30T00:00:00Z"
 
     assert schema["paths"]["/health"]["get"]["security"] == []
     assert "/v1/evidence/replay/{request_id}" not in schema["paths"]
 
     llms = client.get("/llms.txt")
     assert llms.status_code == 200
+    assert "/v1/ofac/payment-preflight - $0.01 USDC" in llms.text
+    assert "/v1/sec/filing-change-signal - $0.01 USDC" in llms.text
     assert "/v1/ofac/exact-identifier-evidence - $0.05 USDC" in llms.text
     assert "/v1/sec/filing-trigger-delta - $0.10 USDC" in llms.text
 
@@ -194,6 +212,25 @@ def test_machine_discovery_and_crawler_surfaces(client):
 @pytest.mark.parametrize(
     ("path", "body", "expected_tag", "expected_amount"),
     [
+        (
+            "/v1/ofac/payment-preflight",
+            {
+                "address": "0x0000000000000000000000000000000000000000",
+                "network": "eip155:8453",
+            },
+            "payment-preflight",
+            "10000",
+        ),
+        (
+            "/v1/sec/filing-change-signal",
+            {
+                "ticker": "AAPL",
+                "since": "2026-07-30T00:00:00Z",
+                "forms": ["8-K"],
+            },
+            "filing-change",
+            "10000",
+        ),
         (
             "/v1/sec/filing-trigger-delta",
             {
@@ -242,6 +279,8 @@ def test_verdict_routes_advertise_payment_and_bazaar_post_schema(
 @pytest.mark.parametrize(
     ("path", "expected_amount"),
     [
+        ("/v1/ofac/payment-preflight", "10000"),
+        ("/v1/sec/filing-change-signal", "10000"),
         ("/v1/sec/filing-trigger-delta", "100000"),
         ("/v1/ofac/exact-identifier-evidence", "50000"),
     ],
@@ -276,6 +315,28 @@ def test_empty_json_object_is_still_rejected_before_payment(client):
     assert response.status_code == 422
     assert "payment-required" not in response.headers
     assert response.json()["error"]["code"] == "INVALID_INPUT"
+
+
+def test_legacy_fly_origin_retires_paid_routes_and_redirects_public_pages(client):
+    paid = client.post(
+        "/v1/ofac/payment-preflight",
+        headers={"host": "iti-official-source-evidence.fly.dev"},
+    )
+    assert paid.status_code == 410
+    assert paid.json()["error"]["code"] == "LEGACY_ORIGIN_RETIRED"
+    assert paid.json()["error"]["canonical_url"].endswith("/v1/ofac/payment-preflight")
+
+    public = client.get(
+        "/health",
+        headers={"host": "iti-official-source-evidence.fly.dev"},
+        follow_redirects=False,
+    )
+    assert public.status_code == 308
+    assert public.headers["location"] == "http://localhost:8765/health"
+
+
+def test_x402_list_domain_proof_is_disabled_without_token(client):
+    assert client.get("/.well-known/x402list.txt").status_code == 404
 
 
 def test_invalid_input_is_rejected_before_payment(client):

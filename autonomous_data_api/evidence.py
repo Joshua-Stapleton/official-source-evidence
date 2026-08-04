@@ -12,7 +12,7 @@ import sqlite3
 import unicodedata
 import zlib
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Literal
@@ -22,7 +22,7 @@ import httpx
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from defusedxml import ElementTree
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_DIR = ROOT / "autonomous_data_api" / "runtime"
@@ -31,6 +31,7 @@ EVIDENCE_DB_PATH = Path(
 )
 SEC_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
 SEC_COMPANYFACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
+SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 SEC_ARCHIVES_ROOT = "https://www.sec.gov/Archives/edgar/data"
 OFAC_SOURCE_URLS = {
     "SDN": (
@@ -122,26 +123,71 @@ class ContractError(EvidenceError):
         super().__init__(code, detail, 422)
 
 
-class SecDeltaRequest(BaseModel):
+class SecIssuerRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    cik: str = Field(min_length=1, max_length=10)
-    since_accession: str = Field(pattern=r"^\d{10}-\d{2}-\d{6}$")
+    cik: str | None = Field(default=None, min_length=1, max_length=10)
+    ticker: str | None = Field(default=None, min_length=1, max_length=10)
+    max_source_age_seconds: int = Field(default=600, ge=60, le=3600)
+
+    @field_validator("cik", mode="before")
+    @classmethod
+    def normalize_cik(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        raw = str(value).strip()
+        if not raw.isdigit() or len(raw) > 10:
+            raise ValueError("cik must contain at most 10 digits")
+        return raw.zfill(10)
+
+    @field_validator("ticker", mode="before")
+    @classmethod
+    def normalize_ticker(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        ticker = str(value).strip().upper()
+        if not re.fullmatch(r"[A-Z0-9.-]{1,10}", ticker):
+            raise ValueError("ticker must be 1-10 letters, digits, dots, or hyphens")
+        return ticker
+
+    @model_validator(mode="after")
+    def require_one_issuer(self) -> SecIssuerRequest:
+        if bool(self.cik) == bool(self.ticker):
+            raise ValueError("provide exactly one of cik or ticker")
+        return self
+
+
+def normalize_since_timestamp(value: Any) -> str:
+    raw = str(value).strip()
+    try:
+        parsed = parse_utc(raw).astimezone(timezone.utc)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("since must be an ISO 8601 timestamp") from exc
+    if parsed > datetime.now(timezone.utc) + timedelta(minutes=5):
+        raise ValueError("since cannot be in the future")
+    return parsed.isoformat()
+
+
+class SecDeltaRequest(SecIssuerRequest):
+    since_accession: str | None = Field(default=None, pattern=r"^\d{10}-\d{2}-\d{6}$")
+    since: str | None = None
     forms: list[Literal["8-K", "10-Q", "10-K"]] = Field(
         default_factory=lambda: ["8-K", "10-Q", "10-K"],
         min_length=1,
         max_length=3,
     )
     rules: list[str] = Field(default_factory=list, max_length=20)
-    max_source_age_seconds: int = Field(default=600, ge=60, le=3600)
 
-    @field_validator("cik", mode="before")
+    @field_validator("since", mode="before")
     @classmethod
-    def normalize_cik(cls, value: Any) -> str:
-        raw = str(value).strip()
-        if not raw.isdigit() or len(raw) > 10:
-            raise ValueError("cik must contain at most 10 digits")
-        return raw.zfill(10)
+    def normalize_since(cls, value: Any) -> str | None:
+        return None if value is None else normalize_since_timestamp(value)
+
+    @model_validator(mode="after")
+    def require_one_baseline(self) -> SecDeltaRequest:
+        if bool(self.since_accession) == bool(self.since):
+            raise ValueError("provide exactly one of since_accession or since")
+        return self
 
     @field_validator("forms")
     @classmethod
@@ -160,6 +206,25 @@ class SecDeltaRequest(BaseModel):
         if invalid:
             raise ValueError(f"unsupported deterministic rules: {invalid}")
         return cleaned
+
+
+class SecSignalRequest(SecIssuerRequest):
+    since: str
+    forms: list[Literal["8-K", "10-Q", "10-K"]] = Field(
+        default_factory=lambda: ["8-K", "10-Q", "10-K"],
+        min_length=1,
+        max_length=3,
+    )
+
+    @field_validator("since", mode="before")
+    @classmethod
+    def normalize_since(cls, value: Any) -> str:
+        return normalize_since_timestamp(value)
+
+    @field_validator("forms")
+    @classmethod
+    def unique_forms(cls, value: list[str]) -> list[str]:
+        return list(dict.fromkeys(value))
 
 
 class OfacExactRequest(BaseModel):
@@ -197,6 +262,18 @@ class OfacExactRequest(BaseModel):
     @classmethod
     def unique_lists(cls, value: list[str]) -> list[str]:
         return list(dict.fromkeys(value))
+
+
+class OfacPreflightRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    address: str = Field(pattern=r"^0x[0-9A-Fa-f]{40}$")
+    network: str = Field(default="eip155:8453", pattern=r"^eip155:\d+$")
+
+    @field_validator("address")
+    @classmethod
+    def normalize_address(cls, value: str) -> str:
+        return value.lower()
 
 
 @dataclass(frozen=True)
@@ -795,6 +872,80 @@ class EvidenceService:
             rows.append(row)
         return rows
 
+    def _resolve_sec_cik(
+        self,
+        *,
+        cik: str | None,
+        ticker: str | None,
+        max_age_seconds: int,
+    ) -> tuple[str, SourceSnapshot | None]:
+        if cik:
+            return cik, None
+        if not ticker:
+            raise ContractError("ISSUER_REQUIRED", "provide a CIK or ticker")
+        snapshot = self._fetch_sec_source(
+            "sec:company-tickers",
+            SEC_TICKERS_URL,
+            max_age_seconds,
+        )
+        try:
+            payload = json.loads(snapshot.content)
+        except Exception as exc:
+            raise SourceSchemaError(
+                f"SEC ticker map JSON parsing failed: {exc}"
+            ) from exc
+        entries = payload.values() if isinstance(payload, dict) else []
+        match = next(
+            (
+                item
+                for item in entries
+                if isinstance(item, dict)
+                and str(item.get("ticker", "")).upper() == ticker
+            ),
+            None,
+        )
+        if not match or not str(match.get("cik_str", "")).isdigit():
+            raise ContractError(
+                "TICKER_NOT_FOUND",
+                "ticker was not found in the official SEC company ticker map",
+            )
+        return str(match["cik_str"]).zfill(10), snapshot
+
+    @staticmethod
+    def _sec_row_timestamp(row: dict[str, Any]) -> datetime:
+        accepted = str(row.get("acceptanceDateTime") or "").strip()
+        if accepted:
+            try:
+                if re.fullmatch(r"\d{14}", accepted):
+                    return datetime.strptime(accepted, "%Y%m%d%H%M%S").replace(
+                        tzinfo=timezone.utc
+                    )
+                return parse_utc(accepted).astimezone(timezone.utc)
+            except ValueError:
+                pass
+        filed = str(row.get("filingDate") or "").strip()
+        try:
+            return datetime.fromisoformat(filed).replace(tzinfo=timezone.utc)
+        except ValueError as exc:
+            raise SourceSchemaError(
+                "SEC filing row has no valid filing timestamp"
+            ) from exc
+
+    @classmethod
+    def _sec_rows_since(
+        cls,
+        rows: list[dict[str, Any]],
+        since: str,
+        forms: list[str],
+    ) -> list[dict[str, Any]]:
+        baseline = parse_utc(since).astimezone(timezone.utc)
+        selected = [
+            row
+            for row in rows
+            if row.get("form") in set(forms) and cls._sec_row_timestamp(row) > baseline
+        ]
+        return sorted(selected, key=cls._sec_row_timestamp, reverse=True)
+
     @staticmethod
     def _sec_document_url(cik: str, accession: str, primary_document: str) -> str:
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", primary_document):
@@ -978,6 +1129,8 @@ class EvidenceService:
         request_hash: str,
         source_bundle_hash: str,
         result_core: dict[str, Any],
+        *,
+        include_receipt: bool = True,
     ) -> PreparedResult:
         hash_payload = json.loads(json.dumps(result_core))
         if isinstance(hash_payload.get("provenance"), dict):
@@ -990,8 +1143,9 @@ class EvidenceService:
         result = {
             "request_id": request_id,
             **result_core,
-            "receipt": self._receipt(result_hash),
         }
+        if include_receipt:
+            result["receipt"] = self._receipt(result_hash)
         with self._connect() as connection:
             connection.execute(
                 """
@@ -1019,9 +1173,14 @@ class EvidenceService:
     def prepare_sec(self, request: SecDeltaRequest) -> PreparedResult:
         request_payload = request.model_dump(mode="json")
         request_hash = sha256_json(request_payload)
+        resolved_cik, ticker_snapshot = self._resolve_sec_cik(
+            cik=request.cik,
+            ticker=request.ticker,
+            max_age_seconds=request.max_source_age_seconds,
+        )
         submissions = self._fetch_sec_source(
-            f"sec:submissions:{request.cik}",
-            SEC_SUBMISSIONS_URL.format(cik=request.cik),
+            f"sec:submissions:{resolved_cik}",
+            SEC_SUBMISSIONS_URL.format(cik=resolved_cik),
             request.max_source_age_seconds,
         )
         try:
@@ -1031,10 +1190,12 @@ class EvidenceService:
                 f"SEC submissions JSON parsing failed: {exc}"
             ) from exc
 
-        source_snapshots = [submissions]
+        source_snapshots = [
+            snapshot for snapshot in (ticker_snapshot, submissions) if snapshot
+        ]
         rows = self._submission_rows(submissions_payload)
         accessions = {row.get("accessionNumber") for row in rows}
-        if request.since_accession not in accessions:
+        if request.since_accession and request.since_accession not in accessions:
             supplemental = submissions_payload.get("filings", {}).get("files", [])
             for item in supplemental[:MAX_SEC_SUPPLEMENTAL_FILES]:
                 name = item.get("name", "")
@@ -1058,25 +1219,31 @@ class EvidenceService:
                 ):
                     break
 
-        baseline_index = next(
-            (
-                index
-                for index, row in enumerate(rows)
-                if row.get("accessionNumber") == request.since_accession
-            ),
-            None,
-        )
-        if baseline_index is None:
-            raise ContractError(
-                "BASELINE_NOT_AVAILABLE",
-                "since_accession was not found in the bounded SEC filing history",
+        if request.since_accession:
+            baseline_index = next(
+                (
+                    index
+                    for index, row in enumerate(rows)
+                    if row.get("accessionNumber") == request.since_accession
+                ),
+                None,
             )
-
-        selected_rows = [
-            row
-            for row in rows[:baseline_index]
-            if row.get("form") in set(request.forms)
-        ]
+            if baseline_index is None:
+                raise ContractError(
+                    "BASELINE_NOT_AVAILABLE",
+                    "since_accession was not found in the bounded SEC filing history",
+                )
+            selected_rows = [
+                row
+                for row in rows[:baseline_index]
+                if row.get("form") in set(request.forms)
+            ]
+        else:
+            selected_rows = self._sec_rows_since(
+                rows,
+                request.since or "",
+                request.forms,
+            )
         if len(selected_rows) > MAX_SEC_FILINGS:
             raise ContractError(
                 "RESULT_LIMIT_EXCEEDED",
@@ -1088,7 +1255,7 @@ class EvidenceService:
             accession = row.get("accessionNumber", "")
             primary_document = row.get("primaryDocument", "")
             document_url = self._sec_document_url(
-                request.cik, accession, primary_document
+                resolved_cik, accession, primary_document
             )
             document = self._fetch_sec_source(
                 f"sec:document:{accession}:{primary_document}",
@@ -1124,8 +1291,8 @@ class EvidenceService:
         xbrl_rules = [rule for rule in request.rules if rule.startswith("XBRL:")]
         if xbrl_rules and filings:
             companyfacts = self._fetch_sec_source(
-                f"sec:companyfacts:{request.cik}",
-                SEC_COMPANYFACTS_URL.format(cik=request.cik),
+                f"sec:companyfacts:{resolved_cik}",
+                SEC_COMPANYFACTS_URL.format(cik=resolved_cik),
                 request.max_source_age_seconds,
             )
             source_snapshots.append(companyfacts)
@@ -1167,10 +1334,15 @@ class EvidenceService:
             "decision": "NEW_FILING" if filings else "NO_NEW_FILING",
             "checked_at": source_snapshot_at,
             "issuer": {
-                "cik": request.cik,
+                "cik": resolved_cik,
                 "name": submissions_payload.get("name"),
                 "tickers_observed": sorted(submissions_payload.get("tickers") or []),
             },
+            "baseline": (
+                {"type": "accession", "value": request.since_accession}
+                if request.since_accession
+                else {"type": "timestamp", "value": request.since}
+            ),
             "baseline_accession": request.since_accession,
             "filings": filings,
             "selected_fact_deltas": selected_fact_deltas,
@@ -1189,6 +1361,98 @@ class EvidenceService:
         }
         return self._store_prepared(
             "sec", request_hash, source_bundle_hash, result_core
+        )
+
+    def prepare_sec_signal(self, request: SecSignalRequest) -> PreparedResult:
+        request_payload = request.model_dump(mode="json")
+        request_hash = sha256_json(request_payload)
+        resolved_cik, ticker_snapshot = self._resolve_sec_cik(
+            cik=request.cik,
+            ticker=request.ticker,
+            max_age_seconds=request.max_source_age_seconds,
+        )
+        submissions = self._fetch_sec_source(
+            f"sec:submissions:{resolved_cik}",
+            SEC_SUBMISSIONS_URL.format(cik=resolved_cik),
+            request.max_source_age_seconds,
+        )
+        try:
+            submissions_payload = json.loads(submissions.content)
+        except Exception as exc:
+            raise SourceSchemaError(
+                f"SEC submissions JSON parsing failed: {exc}"
+            ) from exc
+
+        snapshots = [
+            snapshot for snapshot in (ticker_snapshot, submissions) if snapshot
+        ]
+        rows = self._sec_rows_since(
+            self._submission_rows(submissions_payload),
+            request.since,
+            request.forms,
+        )
+        source_payload_hash = sha256_json(
+            sorted(snapshot.content_sha256 for snapshot in snapshots)
+        )
+        source_bundle_hash = sha256_json(
+            {
+                "parser_version": SEC_PARSER_VERSION,
+                "source_payload_hash": source_payload_hash,
+                "product": "filing-change-signal",
+            }
+        )
+        cached = self._cached_prepared("sec_signal", request_hash, source_bundle_hash)
+        if cached:
+            return cached
+
+        filings = []
+        for row in rows[:MAX_SEC_FILINGS]:
+            accession = str(row.get("accessionNumber") or "")
+            primary_document = str(row.get("primaryDocument") or "")
+            filings.append(
+                {
+                    "accession": accession,
+                    "form": row.get("form"),
+                    "filed_at": row.get("acceptanceDateTime") or row.get("filingDate"),
+                    "primary_document_url": self._sec_document_url(
+                        resolved_cik,
+                        accession,
+                        primary_document,
+                    ),
+                }
+            )
+        result_core = {
+            "decision": "NEW_RELEVANT_FILING" if rows else "NO_NEW_RELEVANT_FILING",
+            "issuer": {
+                "cik": resolved_cik,
+                "name": submissions_payload.get("name"),
+                "tickers_observed": sorted(submissions_payload.get("tickers") or []),
+            },
+            "since": request.since,
+            "next_since": submissions.retrieved_at,
+            "forms_checked": request.forms,
+            "filing_count": len(rows),
+            "filings": filings,
+            "truncated": len(rows) > MAX_SEC_FILINGS,
+            "premium_evidence_path": "/v1/sec/filing-trigger-delta",
+            "provenance": {
+                "publisher": "U.S. Securities and Exchange Commission",
+                "official_source_url": SEC_SUBMISSIONS_URL.format(cik=resolved_cik),
+                "source_snapshot_at": submissions.retrieved_at,
+                "parser_version": SEC_PARSER_VERSION,
+                "result_sha256": None,
+            },
+            "limitations": [
+                "Filing-presence signal only; no materiality opinion or investment advice.",
+                "The premium endpoint adds document hashes, selected fact deltas, and a signed receipt.",
+            ],
+        }
+        return self._store_prepared(
+            "sec_signal",
+            request_hash,
+            source_bundle_hash,
+            result_core,
+            include_receipt=False,
         )
 
     def prepare_ofac(self, request: OfacExactRequest) -> PreparedResult:
@@ -1289,6 +1553,61 @@ class EvidenceService:
         }
         return self._store_prepared(
             "ofac", request_hash, source_bundle_hash, result_core
+        )
+
+    def prepare_ofac_preflight(self, request: OfacPreflightRequest) -> PreparedResult:
+        request_payload = request.model_dump(mode="json")
+        request_hash = sha256_json(request_payload)
+        premium = self.prepare_ofac(
+            OfacExactRequest(
+                identifier_type="crypto_address",
+                identifier=request.address,
+                networks=[request.network],
+                lists=["SDN", "CONSOLIDATED"],
+            )
+        )
+        cached = self._cached_prepared(
+            "ofac_preflight", request_hash, premium.source_bundle_hash
+        )
+        if cached:
+            return cached
+
+        source_versions = premium.result.get("source_versions", [])
+        checked_at_values = [
+            str(item.get("verified_current_at"))
+            for item in source_versions
+            if item.get("verified_current_at")
+        ]
+        checked_at = max(checked_at_values) if checked_at_values else utc_now()
+        matched = premium.result.get("match_status") == "EXACT_MATCH"
+        result_core = {
+            "decision": (
+                "STOP_EXACT_OFAC_MATCH" if matched else "NO_EXACT_OFAC_MATCH_FOUND"
+            ),
+            "address": request.address,
+            "network": request.network,
+            "match_count": len(premium.result.get("matches", [])),
+            "checked_lists": ["SDN", "CONSOLIDATED"],
+            "checked_at": checked_at,
+            "source_age_seconds": age_seconds(checked_at),
+            "premium_evidence_path": "/v1/ofac/exact-identifier-evidence",
+            "provenance": {
+                "publisher": "U.S. Department of the Treasury, OFAC",
+                "normalization_version": OFAC_PARSER_VERSION,
+                "result_sha256": None,
+            },
+            "limitations": [
+                "Exact address match only; no ownership, exposure, or fuzzy screening.",
+                "No-match is not sanctions clearance or legal advice.",
+                "The premium endpoint adds source hashes, matching records, and a signed receipt.",
+            ],
+        }
+        return self._store_prepared(
+            "ofac_preflight",
+            request_hash,
+            premium.source_bundle_hash,
+            result_core,
+            include_receipt=False,
         )
 
     def record_attempt(
@@ -1428,7 +1747,7 @@ class EvidenceService:
             ).fetchone()
         return json.loads(row["result_json"]) if row else None
 
-    def experiment_status(self) -> dict[str, Any]:
+    def experiment_status(self, cohort_start_utc: str | None = None) -> dict[str, Any]:
         with self._connect() as connection:
             rows = connection.execute(
                 """
@@ -1448,7 +1767,21 @@ class EvidenceService:
                 FROM source_status ORDER BY source_id
                 """
             ).fetchall()
-        return {
+            cohort_rows = (
+                connection.execute(
+                    """
+                    SELECT route, timestamp_utc, quoted_price, payer_wallet_hmac,
+                           owner_or_test_flag, response_status
+                    FROM evidence_attempts
+                    WHERE timestamp_utc >= ?
+                    ORDER BY timestamp_utc
+                    """,
+                    (cohort_start_utc,),
+                ).fetchall()
+                if cohort_start_utc
+                else []
+            )
+        status = {
             "generated_at": utc_now(),
             "metrics": [dict(row) for row in rows],
             "sources": [dict(row) for row in sources],
@@ -1457,6 +1790,166 @@ class EvidenceService:
                 "establish independent demand."
             ),
         }
+        if not cohort_start_utc:
+            return status
+
+        route_metadata = {
+            "/v1/ofac/payment-preflight": {
+                "tier": "decision",
+                "price_usd": "0.01",
+                "hypothesis": "Agents will pay for a compact pre-payment OFAC exact-match gate.",
+            },
+            "/v1/sec/filing-change-signal": {
+                "tier": "decision",
+                "price_usd": "0.01",
+                "hypothesis": "Agents will pay for a ticker-and-timestamp SEC filing-change signal.",
+            },
+            "/v1/ofac/exact-identifier-evidence": {
+                "tier": "premium",
+                "price_usd": "0.05",
+                "hypothesis": "A subset of buyers will pay for signed official-source evidence.",
+            },
+            "/v1/sec/filing-trigger-delta": {
+                "tier": "premium",
+                "price_usd": "0.10",
+                "hypothesis": "A subset of buyers will pay for document hashes and XBRL deltas.",
+            },
+        }
+        funnels: dict[str, dict[str, Any]] = {}
+        payer_days: dict[str, set[str]] = {}
+        payer_calls: dict[str, int] = {}
+        independent_revenue = Decimal(0)
+        independent_paid_attempts = 0
+        independent_fulfilled = 0
+
+        for route, metadata in route_metadata.items():
+            funnels[route] = {
+                "route": route,
+                **metadata,
+                "payment_challenges": 0,
+                "owner_fulfilled_calls": 0,
+                "independent_fulfilled_calls": 0,
+                "independent_buyer_clusters": 0,
+                "repeat_independent_buyer_clusters": 0,
+                "independent_revenue_usd": "0.00",
+                "independent_paid_or_settlement_failures": 0,
+                "independent_paid_fulfillment_rate_percent": None,
+            }
+
+        route_payers: dict[str, set[str]] = {route: set() for route in funnels}
+        route_payer_days: dict[str, dict[str, set[str]]] = {
+            route: {} for route in funnels
+        }
+        route_independent_revenue: dict[str, Decimal] = {
+            route: Decimal(0) for route in funnels
+        }
+        route_independent_paid_attempts = {route: 0 for route in funnels}
+        route_independent_fulfilled = {route: 0 for route in funnels}
+
+        for row in cohort_rows:
+            route = row["route"]
+            if route not in funnels:
+                continue
+            response_status = row["response_status"]
+            owner_flag = row["owner_or_test_flag"]
+            payer = row["payer_wallet_hmac"]
+            if response_status == "PAYMENT_REQUIRED":
+                funnels[route]["payment_challenges"] += 1
+                continue
+            if response_status == "PAYMENT_OR_SETTLEMENT_FAILED":
+                if owner_flag == "NON_OWNER_UNVERIFIED" and payer:
+                    funnels[route]["independent_paid_or_settlement_failures"] += 1
+                    independent_paid_attempts += 1
+                    route_independent_paid_attempts[route] += 1
+                continue
+            if response_status != "FULFILLED":
+                continue
+
+            if owner_flag == "OWNER":
+                funnels[route]["owner_fulfilled_calls"] += 1
+                continue
+            if owner_flag != "NON_OWNER_UNVERIFIED" or not payer:
+                continue
+
+            funnels[route]["independent_fulfilled_calls"] += 1
+            independent_fulfilled += 1
+            independent_paid_attempts += 1
+            route_independent_fulfilled[route] += 1
+            route_independent_paid_attempts[route] += 1
+            route_payers[route].add(payer)
+            day = str(row["timestamp_utc"])[:10]
+            route_payer_days[route].setdefault(payer, set()).add(day)
+            payer_days.setdefault(payer, set()).add(day)
+            payer_calls[payer] = payer_calls.get(payer, 0) + 1
+            try:
+                price = Decimal(str(row["quoted_price"]).removeprefix("$"))
+            except InvalidOperation:
+                price = Decimal(0)
+            route_independent_revenue[route] += price
+            independent_revenue += price
+
+        for route, funnel in funnels.items():
+            funnel["independent_buyer_clusters"] = len(route_payers[route])
+            funnel["repeat_independent_buyer_clusters"] = sum(
+                1 for days in route_payer_days[route].values() if len(days) >= 2
+            )
+            funnel["independent_revenue_usd"] = (
+                f"{route_independent_revenue[route]:.2f}"
+            )
+            if route_independent_paid_attempts[route]:
+                funnel["independent_paid_fulfillment_rate_percent"] = round(
+                    100
+                    * route_independent_fulfilled[route]
+                    / route_independent_paid_attempts[route],
+                    2,
+                )
+
+        independent_buyers = len(payer_days)
+        repeat_buyers = sum(1 for days in payer_days.values() if len(days) >= 2)
+        top_buyer_share = (
+            max(payer_calls.values()) / independent_fulfilled
+            if independent_fulfilled
+            else None
+        )
+        paid_fulfillment_rate = (
+            Decimal(independent_fulfilled) / Decimal(independent_paid_attempts)
+            if independent_paid_attempts
+            else None
+        )
+        status["conversion_experiment"] = {
+            "cohort_start_utc": cohort_start_utc,
+            "independent_buyer_clusters": independent_buyers,
+            "repeat_independent_buyer_clusters": repeat_buyers,
+            "independent_fulfilled_calls": independent_fulfilled,
+            "independent_revenue_usd": f"{independent_revenue:.2f}",
+            "max_independent_buyer_call_share": (
+                round(top_buyer_share, 4) if top_buyer_share is not None else None
+            ),
+            "independent_paid_fulfillment_rate_percent": (
+                round(100 * float(paid_fulfillment_rate), 2)
+                if paid_fulfillment_rate is not None
+                else None
+            ),
+            "gates": {
+                "five_independent_buyers": independent_buyers >= 5,
+                "fifty_independent_fulfilled_calls": independent_fulfilled >= 50,
+                "two_repeat_buyers_across_utc_days": repeat_buyers >= 2,
+                "paid_fulfillment_at_least_99_percent": bool(
+                    paid_fulfillment_rate is not None
+                    and paid_fulfillment_rate >= Decimal("0.99")
+                ),
+                "no_buyer_above_70_percent_of_calls": bool(
+                    top_buyer_share is not None and top_buyer_share <= 0.70
+                ),
+            },
+            "routes": list(funnels.values()),
+            "measurement_notes": [
+                "Owner and testnet payments are excluded from every conversion gate.",
+                "Unpaid 402 challenges include monitors and crawlers, so they are not treated as buyers or a conversion denominator.",
+                "A repeat buyer must fulfill calls on at least two distinct UTC dates.",
+            ],
+        }
+        return status
 
     def fulfilled_revenue_since(self, timestamp_utc: str, network: str) -> Decimal:
         with self._connect() as connection:

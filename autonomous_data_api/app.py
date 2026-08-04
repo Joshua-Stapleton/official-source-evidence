@@ -18,7 +18,13 @@ from urllib.parse import urlparse
 from cdp.auth.utils.jwt import JwtOptions, generate_jwt
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.openapi.utils import get_openapi
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
+from fastapi.responses import (
+    FileResponse,
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+    Response,
+)
 from pydantic import BaseModel, ValidationError
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -40,8 +46,10 @@ from autonomous_data_api.evidence import (
     EvidenceError,
     EvidenceService,
     OfacExactRequest,
+    OfacPreflightRequest,
     PreparedResult,
     SecDeltaRequest,
+    SecSignalRequest,
 )
 
 X402_TEST_RECIPIENT = "0x000000000000000000000000000000000000dEaD"
@@ -50,6 +58,14 @@ X402_PAY_TO_CONFIGURED = bool(os.getenv("AUTONOMOUS_X402_PAY_TO"))
 X402_PAY_TO = os.getenv("AUTONOMOUS_X402_PAY_TO", X402_TEST_RECIPIENT)
 X402_SEC_PRICE = os.getenv("AUTONOMOUS_X402_SEC_PRICE", "$0.10")
 X402_OFAC_PRICE = os.getenv("AUTONOMOUS_X402_OFAC_PRICE", "$0.05")
+X402_SEC_SIGNAL_PRICE = os.getenv("AUTONOMOUS_X402_SEC_SIGNAL_PRICE", "$0.01")
+X402_OFAC_PREFLIGHT_PRICE = os.getenv("AUTONOMOUS_X402_OFAC_PREFLIGHT_PRICE", "$0.01")
+CONVERSION_EXPERIMENT_START_UTC = os.getenv(
+    "AUTONOMOUS_CONVERSION_EXPERIMENT_START_UTC", ""
+).strip()
+LEGACY_FLY_HOST = os.getenv(
+    "AUTONOMOUS_LEGACY_FLY_HOST", "iti-official-source-evidence.fly.dev"
+).casefold()
 try:
     X402_DAILY_REVENUE_CAP_USD = Decimal(
         os.getenv("AUTONOMOUS_X402_DAILY_REVENUE_CAP_USD", "0")
@@ -69,11 +85,23 @@ PUBLIC_SCHEME = urlparse(PUBLIC_BASE_URL).scheme
 X402_CDP_API_KEY_ID = os.getenv("CDP_API_KEY_ID", "")
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 SERVICE_ICON_URL = f"{PUBLIC_BASE_URL.rstrip('/')}/icon.png"
+SEC_PROBE_SINCE_UTC = (
+    (datetime.now(timezone.utc) - timedelta(days=30))
+    .replace(microsecond=0)
+    .isoformat()
+    .replace("+00:00", "Z")
+)
 SEC_PROBE_PAYLOAD = {
-    "cik": "0000320193",
-    "since_accession": "0000320193-26-000018",
+    "ticker": "AAPL",
+    "since": SEC_PROBE_SINCE_UTC,
     "forms": ["8-K", "10-Q", "10-K"],
     "rules": ["FORM:8-K:ITEM:2.02", "XBRL:us-gaap:Revenues"],
+    "max_source_age_seconds": 600,
+}
+SEC_SIGNAL_PROBE_PAYLOAD = {
+    "ticker": "AAPL",
+    "since": SEC_PROBE_SINCE_UTC,
+    "forms": ["8-K", "10-Q", "10-K"],
     "max_source_age_seconds": 600,
 }
 OFAC_PROBE_PAYLOAD = {
@@ -81,6 +109,10 @@ OFAC_PROBE_PAYLOAD = {
     "identifier": "0x0000000000000000000000000000000000000000",
     "networks": ["eip155:1", "eip155:8453"],
     "lists": ["SDN", "CONSOLIDATED"],
+}
+OFAC_PREFLIGHT_PROBE_PAYLOAD = {
+    "address": "0x0000000000000000000000000000000000000000",
+    "network": "eip155:8453",
 }
 
 
@@ -152,13 +184,13 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="Official Source Evidence API",
-    version="0.3.1",
+    version="0.4.0",
     description=(
         "Pay-per-call, source-hashed SEC EDGAR filing deltas and exact OFAC "
         "identifier evidence for autonomous agents. No API keys or subscriptions. "
         "No investment advice, sanctions clearance, compliance determination, or legal advice."
     ),
-    contact={"name": "ITI Studio", "email": "joshua@regulavita.com"},
+    contact={"name": "Regulavita", "email": "joshua@regulavita.com"},
     lifespan=lifespan,
 )
 
@@ -222,6 +254,186 @@ x402_server = x402ResourceServer(x402_facilitator)
 x402_server.register(X402_NETWORK, ExactEvmServerScheme())
 
 x402_routes: dict[str, RouteConfig] = {
+    "POST /v1/ofac/payment-preflight": RouteConfig(
+        accepts=[
+            PaymentOption(
+                scheme="exact",
+                pay_to=X402_PAY_TO,
+                price=X402_OFAC_PREFLIGHT_PRICE,
+                network=X402_NETWORK,
+            )
+        ],
+        mime_type="application/json",
+        description=(
+            "Before an autonomous agent sends funds, check whether the exact EVM "
+            "destination address appears in current official OFAC SDN or "
+            "Consolidated data. Returns a compact stop/no-exact-match decision, "
+            "freshness, and the premium evidence path; no clearance or legal advice."
+        ),
+        service_name="Official Source Evidence",
+        tags=[
+            "ofac",
+            "sanctions",
+            "wallet-screening",
+            "payment-preflight",
+            "transaction-gate",
+            "crypto-address",
+            "decision",
+        ],
+        icon_url=SERVICE_ICON_URL,
+        extensions=get_discovery_extension(
+            method="POST",
+            input=OFAC_PREFLIGHT_PROBE_PAYLOAD,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "address": {
+                        "type": "string",
+                        "pattern": "^0x[0-9A-Fa-f]{40}$",
+                        "description": "Exact EVM destination wallet address.",
+                    },
+                    "network": {
+                        "type": "string",
+                        "pattern": "^eip155:[0-9]+$",
+                        "default": "eip155:8453",
+                        "description": "CAIP-2 EVM network identifier.",
+                    },
+                },
+                "required": ["address"],
+                "additionalProperties": False,
+            },
+            output=OutputConfig(
+                example={
+                    "request_id": "ofac_preflight_example",
+                    "decision": "NO_EXACT_OFAC_MATCH_FOUND",
+                    "match_count": 0,
+                    "checked_lists": ["SDN", "CONSOLIDATED"],
+                    "checked_at": "2026-08-04T00:00:00Z",
+                    "source_age_seconds": 60,
+                    "premium_evidence_path": "/v1/ofac/exact-identifier-evidence",
+                },
+                schema={
+                    "type": "object",
+                    "required": [
+                        "request_id",
+                        "decision",
+                        "match_count",
+                        "checked_at",
+                    ],
+                    "properties": {
+                        "request_id": {"type": "string"},
+                        "decision": {
+                            "enum": [
+                                "STOP_EXACT_OFAC_MATCH",
+                                "NO_EXACT_OFAC_MATCH_FOUND",
+                            ]
+                        },
+                        "match_count": {"type": "integer"},
+                        "checked_at": {"type": "string", "format": "date-time"},
+                        "source_age_seconds": {"type": "integer"},
+                    },
+                },
+            ),
+        ),
+    ),
+    "POST /v1/sec/filing-change-signal": RouteConfig(
+        accepts=[
+            PaymentOption(
+                scheme="exact",
+                pay_to=X402_PAY_TO,
+                price=X402_SEC_SIGNAL_PRICE,
+                network=X402_NETWORK,
+            )
+        ],
+        mime_type="application/json",
+        description=(
+            "Check whether a company filed a new SEC 8-K, 10-Q, or 10-K after "
+            "a timestamp. Accepts a ticker or CIK and returns a compact filing "
+            "decision, accession links, and a next-check cursor; no materiality "
+            "opinion or investment advice."
+        ),
+        service_name="Official Source Evidence",
+        tags=[
+            "sec",
+            "edgar",
+            "filing-change",
+            "ticker",
+            "8-k",
+            "10-q",
+            "10-k",
+            "event-signal",
+            "decision",
+        ],
+        icon_url=SERVICE_ICON_URL,
+        extensions=get_discovery_extension(
+            method="POST",
+            input=SEC_SIGNAL_PROBE_PAYLOAD,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9.-]{1,10}$",
+                        "description": "US-listed company ticker, for example AAPL.",
+                    },
+                    "cik": {
+                        "type": "string",
+                        "pattern": "^[0-9]{1,10}$",
+                        "description": "SEC Central Index Key; use instead of ticker.",
+                    },
+                    "since": {
+                        "type": "string",
+                        "format": "date-time",
+                        "description": "Return selected forms accepted after this UTC timestamp.",
+                    },
+                    "forms": {
+                        "type": "array",
+                        "items": {"enum": ["8-K", "10-Q", "10-K"]},
+                        "minItems": 1,
+                        "maxItems": 3,
+                    },
+                    "max_source_age_seconds": {
+                        "type": "integer",
+                        "minimum": 60,
+                        "maximum": 3600,
+                    },
+                },
+                "required": ["ticker", "since"],
+                "additionalProperties": False,
+            },
+            output=OutputConfig(
+                example={
+                    "request_id": "sec_signal_example",
+                    "decision": "NEW_RELEVANT_FILING",
+                    "filing_count": 1,
+                    "filings": [],
+                    "next_since": "2026-08-04T00:00:00Z",
+                    "premium_evidence_path": "/v1/sec/filing-trigger-delta",
+                },
+                schema={
+                    "type": "object",
+                    "required": [
+                        "request_id",
+                        "decision",
+                        "filing_count",
+                        "next_since",
+                    ],
+                    "properties": {
+                        "request_id": {"type": "string"},
+                        "decision": {
+                            "enum": [
+                                "NEW_RELEVANT_FILING",
+                                "NO_NEW_RELEVANT_FILING",
+                            ]
+                        },
+                        "filing_count": {"type": "integer"},
+                        "next_since": {"type": "string", "format": "date-time"},
+                        "filings": {"type": "array"},
+                    },
+                },
+            ),
+        ),
+    ),
     "POST /v1/sec/filing-trigger-delta": RouteConfig(
         accepts=[
             PaymentOption(
@@ -233,10 +445,10 @@ x402_routes: dict[str, RouteConfig] = {
         ],
         mime_type="application/json",
         description=(
-            "Detect new SEC EDGAR 8-K, 10-Q, and 10-K filings since a known "
-            "accession and compute selected XBRL fact deltas. Returns official "
-            "source URLs, hashes, freshness, and a signed evidence receipt; no "
-            "investment advice."
+            "Produce premium SEC EDGAR evidence for new 8-K, 10-Q, and 10-K "
+            "filings after an accession or timestamp. Accepts ticker or CIK and "
+            "returns document hashes, selected XBRL fact deltas, freshness, "
+            "official URLs, and a signed receipt; no investment advice."
         ),
         service_name="Official Source Evidence",
         tags=[
@@ -257,10 +469,25 @@ x402_routes: dict[str, RouteConfig] = {
             input_schema={
                 "type": "object",
                 "properties": {
-                    "cik": {"type": "string", "pattern": "^[0-9]{1,10}$"},
+                    "ticker": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9.-]{1,10}$",
+                        "description": "US-listed company ticker; use instead of CIK.",
+                    },
+                    "cik": {
+                        "type": "string",
+                        "pattern": "^[0-9]{1,10}$",
+                        "description": "SEC Central Index Key; use instead of ticker.",
+                    },
                     "since_accession": {
                         "type": "string",
                         "pattern": "^[0-9]{10}-[0-9]{2}-[0-9]{6}$",
+                        "description": "Known SEC accession baseline; use instead of since.",
+                    },
+                    "since": {
+                        "type": "string",
+                        "format": "date-time",
+                        "description": "UTC filing timestamp baseline; use instead of accession.",
                     },
                     "forms": {
                         "type": "array",
@@ -279,7 +506,7 @@ x402_routes: dict[str, RouteConfig] = {
                         "maximum": 3600,
                     },
                 },
-                "required": ["cik", "since_accession"],
+                "required": ["ticker", "since"],
                 "additionalProperties": False,
             },
             output=OutputConfig(
@@ -289,7 +516,26 @@ x402_routes: dict[str, RouteConfig] = {
                     "filings": [],
                     "selected_fact_deltas": [],
                     "provenance": {"parser_version": SEC_PARSER_VERSION},
-                }
+                    "receipt": {"algorithm": "Ed25519"},
+                },
+                schema={
+                    "type": "object",
+                    "required": [
+                        "request_id",
+                        "decision",
+                        "filings",
+                        "provenance",
+                        "receipt",
+                    ],
+                    "properties": {
+                        "request_id": {"type": "string"},
+                        "decision": {"enum": ["NEW_FILING", "NO_NEW_FILING"]},
+                        "filings": {"type": "array"},
+                        "selected_fact_deltas": {"type": "array"},
+                        "provenance": {"type": "object"},
+                        "receipt": {"type": "object"},
+                    },
+                },
             ),
         ),
     ),
@@ -353,7 +599,26 @@ x402_routes: dict[str, RouteConfig] = {
                     "match_status": "NO_EXACT_MATCH",
                     "matches": [],
                     "source_versions": [],
-                }
+                    "receipt": {"algorithm": "Ed25519"},
+                },
+                schema={
+                    "type": "object",
+                    "required": [
+                        "request_id",
+                        "match_status",
+                        "matches",
+                        "source_versions",
+                        "receipt",
+                    ],
+                    "properties": {
+                        "request_id": {"type": "string"},
+                        "match_status": {"enum": ["EXACT_MATCH", "NO_EXACT_MATCH"]},
+                        "matches": {"type": "array"},
+                        "source_versions": {"type": "array"},
+                        "provenance": {"type": "object"},
+                        "receipt": {"type": "object"},
+                    },
+                },
             ),
         ),
     ),
@@ -393,6 +658,18 @@ def find_wallet(value: Any) -> str | None:
 
 class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
     ROUTES: ClassVar[dict[str, tuple[type[BaseModel], str, str, dict[str, Any]]]] = {
+        "/v1/ofac/payment-preflight": (
+            OfacPreflightRequest,
+            "prepare_ofac_preflight",
+            X402_OFAC_PREFLIGHT_PRICE,
+            OFAC_PREFLIGHT_PROBE_PAYLOAD,
+        ),
+        "/v1/sec/filing-change-signal": (
+            SecSignalRequest,
+            "prepare_sec_signal",
+            X402_SEC_SIGNAL_PRICE,
+            SEC_SIGNAL_PROBE_PAYLOAD,
+        ),
         "/v1/sec/filing-trigger-delta": (
             SecDeltaRequest,
             "prepare_sec",
@@ -653,10 +930,44 @@ app.add_middleware(
     network=X402_NETWORK,
     daily_cap=X402_DAILY_REVENUE_CAP_USD,
     route_prices={
+        ("POST", "/v1/ofac/payment-preflight"): price_decimal(
+            X402_OFAC_PREFLIGHT_PRICE
+        ),
+        ("POST", "/v1/sec/filing-change-signal"): price_decimal(X402_SEC_SIGNAL_PRICE),
         ("POST", "/v1/sec/filing-trigger-delta"): price_decimal(X402_SEC_PRICE),
         ("POST", "/v1/ofac/exact-identifier-evidence"): price_decimal(X402_OFAC_PRICE),
     },
 )
+
+
+class LegacyOriginRetirementMiddleware(BaseHTTPMiddleware):
+    PAID_PATHS: ClassVar[set[str]] = {
+        route_key.split(" ", 1)[1] for route_key in x402_routes
+    }
+
+    async def dispatch(self, request: Request, call_next: Any):
+        host = (request.url.hostname or "").casefold()
+        if host != LEGACY_FLY_HOST:
+            return await call_next(request)
+        canonical_url = f"{PUBLIC_BASE_URL.rstrip('/')}{request.url.path}"
+        if request.url.query:
+            canonical_url = f"{canonical_url}?{request.url.query}"
+        if request.url.path in self.PAID_PATHS:
+            return JSONResponse(
+                status_code=410,
+                headers={"Link": f'<{canonical_url}>; rel="canonical"'},
+                content={
+                    "error": {
+                        "code": "LEGACY_ORIGIN_RETIRED",
+                        "detail": "Use the canonical Regulavita evidence domain",
+                        "canonical_url": canonical_url,
+                    }
+                },
+            )
+        return RedirectResponse(canonical_url, status_code=308)
+
+
+app.add_middleware(LegacyOriginRetirementMiddleware)
 
 
 @app.get("/health")
@@ -666,7 +977,12 @@ def health() -> dict[str, Any]:
         "generated_at": utc_now(),
         "x402": {
             "network": X402_NETWORK,
-            "prices": {"sec_delta": X402_SEC_PRICE, "ofac_exact": X402_OFAC_PRICE},
+            "prices": {
+                "ofac_preflight": X402_OFAC_PREFLIGHT_PRICE,
+                "sec_signal": X402_SEC_SIGNAL_PRICE,
+                "ofac_exact": X402_OFAC_PRICE,
+                "sec_delta": X402_SEC_PRICE,
+            },
             "revenue_ready": X402_REVENUE_READY,
             "daily_revenue_cap_usd": (
                 f"${X402_DAILY_REVENUE_CAP_USD:.2f}"
@@ -716,6 +1032,14 @@ def robots() -> PlainTextResponse:
     )
 
 
+@app.get("/.well-known/x402list.txt", include_in_schema=False)
+def x402list_ownership_proof() -> PlainTextResponse:
+    token = os.getenv("X402LIST_OWNERSHIP_TOKEN", "").strip()
+    if not token:
+        raise HTTPException(status_code=404, detail="No active ownership proof")
+    return PlainTextResponse(f"{token}\n")
+
+
 @app.get("/sitemap.xml", include_in_schema=False)
 def sitemap() -> Response:
     base_url = PUBLIC_BASE_URL.rstrip("/")
@@ -737,8 +1061,10 @@ def llms_txt() -> PlainTextResponse:
 Pay-per-call official-source evidence for autonomous agents. No account, API key, or subscription.
 
 ## Paid endpoints
-- POST {base_url}/v1/ofac/exact-identifier-evidence - $0.05 USDC on Base via x402 v2. Exact OFAC SDN or Consolidated lookup for a crypto address, OFAC UID, or exact name. Returns source versions, hashes, matches, limitations, and a signed receipt.
-- POST {base_url}/v1/sec/filing-trigger-delta - $0.10 USDC on Base via x402 v2. Detect SEC EDGAR 8-K, 10-Q, or 10-K filings since an accession and return selected deterministic XBRL fact deltas with source proof.
+- POST {base_url}/v1/ofac/payment-preflight - $0.01 USDC. Before sending funds, check whether an exact EVM destination address appears in current official OFAC SDN or Consolidated data. Compact decision output; no signed receipt.
+- POST {base_url}/v1/sec/filing-change-signal - $0.01 USDC. Check a ticker or CIK for a new 8-K, 10-Q, or 10-K after a timestamp. Compact filing signal and next-check cursor; no signed receipt.
+- POST {base_url}/v1/ofac/exact-identifier-evidence - $0.05 USDC. Premium exact OFAC evidence with source versions, hashes, matching records, limitations, and an Ed25519-signed receipt.
+- POST {base_url}/v1/sec/filing-trigger-delta - $0.10 USDC. Premium SEC evidence from a ticker or CIK and timestamp or accession, with document hashes, selected deterministic XBRL fact deltas, and an Ed25519-signed receipt.
 
 ## Machine-readable contracts
 - OpenAPI: {base_url}/openapi.json
@@ -759,8 +1085,8 @@ def agent_manifest() -> dict[str, Any]:
     return {
         "name": "Official Source Evidence API",
         "description": (
-            "Pay-per-call SEC EDGAR filing deltas and exact OFAC identifier evidence "
-            "with versioned official-source proof and signed receipts."
+            "Pay-per-call OFAC payment preflight and SEC filing-change decisions, "
+            "plus premium signed official-source evidence receipts."
         ),
         "contact": "joshua@regulavita.com",
         "icon_url": SERVICE_ICON_URL,
@@ -769,6 +1095,8 @@ def agent_manifest() -> dict[str, Any]:
             "protocol": "x402-v2",
             "network": X402_NETWORK,
             "prices": {
+                "/v1/ofac/payment-preflight": X402_OFAC_PREFLIGHT_PRICE,
+                "/v1/sec/filing-change-signal": X402_SEC_SIGNAL_PRICE,
                 "/v1/sec/filing-trigger-delta": X402_SEC_PRICE,
                 "/v1/ofac/exact-identifier-evidence": X402_OFAC_PRICE,
             },
@@ -786,6 +1114,8 @@ def agent_manifest() -> dict[str, Any]:
             f"{base_url}/v1/ofac/sample",
         ],
         "agent_paid_endpoints": [
+            f"{base_url}/v1/ofac/payment-preflight",
+            f"{base_url}/v1/sec/filing-change-signal",
             f"{base_url}/v1/sec/filing-trigger-delta",
             f"{base_url}/v1/ofac/exact-identifier-evidence",
         ],
@@ -824,10 +1154,15 @@ def sec_sample() -> dict[str, Any]:
         "as_of": "2026-08-01",
         "live_source_result": False,
         "request": {
-            "cik": "0000320193",
-            "since_accession": "0000320193-26-000018",
+            "ticker": "AAPL",
+            "since": "2026-07-30T00:00:00Z",
             "forms": ["8-K", "10-Q", "10-K"],
             "rules": ["FORM:8-K:ITEM:2.02", "XBRL:us-gaap:Revenues"],
+        },
+        "decision_endpoint": {
+            "path": "/v1/sec/filing-change-signal",
+            "price": X402_SEC_SIGNAL_PRICE,
+            "response": "NEW_RELEVANT_FILING | NO_NEW_RELEVANT_FILING",
         },
         "response_shape": {
             "decision": "NEW_FILING | NO_NEW_FILING",
@@ -848,6 +1183,15 @@ def ofac_sample() -> dict[str, Any]:
         "sample_type": "static_contract_fixture",
         "as_of": "2026-08-01",
         "live_source_result": False,
+        "decision_request": {
+            "address": "0x0000000000000000000000000000000000000000",
+            "network": "eip155:8453",
+        },
+        "decision_endpoint": {
+            "path": "/v1/ofac/payment-preflight",
+            "price": X402_OFAC_PREFLIGHT_PRICE,
+            "response": "STOP_EXACT_OFAC_MATCH | NO_EXACT_OFAC_MATCH_FOUND",
+        },
         "request": {
             "identifier_type": "crypto_address",
             "identifier": "0x0000000000000000000000000000000000000000",
@@ -862,6 +1206,30 @@ def ofac_sample() -> dict[str, Any]:
             "limitations": ["No-match is not sanctions clearance or legal advice."],
         },
     }
+
+
+@app.post("/v1/ofac/payment-preflight")
+def ofac_payment_preflight(
+    request: Request,
+    payload: OfacPreflightRequest | None = None,
+) -> dict[str, Any]:
+    del payload
+    prepared: PreparedResult | None = getattr(request.state, "evidence_prepared", None)
+    if prepared is None:
+        raise HTTPException(status_code=503, detail="Prepared result unavailable")
+    return prepared.result
+
+
+@app.post("/v1/sec/filing-change-signal")
+def sec_filing_change_signal(
+    request: Request,
+    payload: SecSignalRequest | None = None,
+) -> dict[str, Any]:
+    del payload
+    prepared: PreparedResult | None = getattr(request.state, "evidence_prepared", None)
+    if prepared is None:
+        raise HTTPException(status_code=503, detail="Prepared result unavailable")
+    return prepared.result
 
 
 @app.post("/v1/sec/filing-trigger-delta")
@@ -906,7 +1274,7 @@ def replay_evidence_result(
 
 @app.get("/v1/experiments/status")
 def evidence_experiment_status() -> dict[str, Any]:
-    return evidence_service.experiment_status()
+    return evidence_service.experiment_status(CONVERSION_EXPERIMENT_START_UTC or None)
 
 
 @app.get("/v1/summary")
@@ -914,10 +1282,14 @@ def summary() -> dict[str, Any]:
     return {
         "service": "Official Source Evidence API",
         "products": [
+            "/v1/ofac/payment-preflight",
+            "/v1/sec/filing-change-signal",
             "/v1/sec/filing-trigger-delta",
             "/v1/ofac/exact-identifier-evidence",
         ],
-        "experiment": evidence_service.experiment_status(),
+        "experiment": evidence_service.experiment_status(
+            CONVERSION_EXPERIMENT_START_UTC or None
+        ),
     }
 
 
@@ -982,31 +1354,57 @@ def custom_openapi() -> dict[str, Any]:
     )
     schema["servers"] = [{"url": PUBLIC_BASE_URL.rstrip("/")}]
     schema["info"]["contact"] = {
-        "name": "ITI Studio",
+        "name": "Regulavita",
         "email": "joshua@regulavita.com",
     }
     schema["info"]["x-guidance"] = (
-        "Use POST /v1/ofac/exact-identifier-evidence for exact OFAC SDN or "
-        "Consolidated identifier evidence. Use POST /v1/sec/filing-trigger-delta "
-        "to detect SEC EDGAR 8-K, 10-Q, or 10-K filings since a known accession "
-        "and compute selected XBRL fact deltas. Both routes accept automatic x402 "
-        "v2 USDC payment on Base mainnet and require no account or API key. "
-        "An empty POST is a supported monitoring probe and returns the same 402 "
-        "challenge using the published example request."
+        "Use POST /v1/ofac/payment-preflight before sending funds to an EVM "
+        "address. Use POST /v1/sec/filing-change-signal to check a ticker since "
+        "a timestamp. These compact decision routes cost $0.01. Buy the matching "
+        "premium route only when document/source hashes, detailed records, XBRL "
+        "deltas, or an Ed25519-signed receipt are required. All paid routes accept "
+        "automatic x402 v2 USDC payment on Base mainnet without an account or API "
+        "key. An empty POST is a supported monitoring probe."
     )
 
     paid_operations: dict[str, dict[str, Any]] = {
+        "/v1/ofac/payment-preflight": {
+            "price": f"{price_decimal(X402_OFAC_PREFLIGHT_PRICE):.6f}",
+            "example": OFAC_PREFLIGHT_PROBE_PAYLOAD,
+            "description": (
+                "Compact exact OFAC address decision for an autonomous payment "
+                "preflight. The result is not a sanctions clearance."
+            ),
+        },
+        "/v1/sec/filing-change-signal": {
+            "price": f"{price_decimal(X402_SEC_SIGNAL_PRICE):.6f}",
+            "example": SEC_SIGNAL_PROBE_PAYLOAD,
+            "description": (
+                "Compact SEC 8-K, 10-Q, or 10-K filing-presence signal from a "
+                "ticker or CIK and UTC timestamp."
+            ),
+        },
         "/v1/sec/filing-trigger-delta": {
             "price": f"{price_decimal(X402_SEC_PRICE):.6f}",
             "example": SEC_PROBE_PAYLOAD,
+            "description": (
+                "Premium SEC filing evidence with official document hashes, "
+                "selected deterministic XBRL deltas, and a signed receipt."
+            ),
         },
         "/v1/ofac/exact-identifier-evidence": {
             "price": f"{price_decimal(X402_OFAC_PRICE):.6f}",
             "example": OFAC_PROBE_PAYLOAD,
+            "description": (
+                "Premium exact OFAC identifier evidence with source hashes, "
+                "matching records, and a signed receipt."
+            ),
         },
     }
     sec_properties = schema["components"]["schemas"]["SecDeltaRequest"]["properties"]
+    sec_properties["ticker"]["example"] = "AAPL"
     sec_properties["cik"]["example"] = "0000320193"
+    sec_properties["since"]["example"] = "2026-07-30T00:00:00Z"
     sec_properties["since_accession"]["example"] = "0000320193-26-000018"
     for path, path_item in schema.get("paths", {}).items():
         for method, operation in path_item.items():
@@ -1015,6 +1413,7 @@ def custom_openapi() -> dict[str, Any]:
             paid = paid_operations.get(path) if method == "post" else None
             if paid:
                 operation.pop("security", None)
+                operation["description"] = paid["description"]
                 operation["x-payment-info"] = {
                     "price": {
                         "mode": "fixed",

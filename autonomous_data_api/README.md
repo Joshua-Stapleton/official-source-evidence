@@ -4,6 +4,8 @@ This is the implementation of the 1 August 2026 autonomous-business sprint verdi
 
 Paid candidates:
 
+- `POST /v1/ofac/payment-preflight` at `$0.01` USDC per fulfilled call.
+- `POST /v1/sec/filing-change-signal` at `$0.01` USDC per fulfilled call.
 - `POST /v1/sec/filing-trigger-delta` at `$0.10` USDC per fulfilled call.
 - `POST /v1/ofac/exact-identifier-evidence` at `$0.05` USDC per fulfilled call.
 
@@ -11,9 +13,9 @@ The PFAS and grid lead endpoints remain available for prior API-key experiments,
 
 ## Product Boundaries
 
-The SEC endpoint returns filing metadata, accession/document hashes, selected XBRL fact deltas, source freshness, and provenance. It never returns ratings, materiality opinions, valuation, trading advice, or execution instructions.
+The SEC signal accepts a ticker and timestamp and returns a compact filing-change decision. The premium SEC endpoint also accepts CIK and accession inputs, and adds document hashes, selected XBRL fact deltas, source freshness, provenance, and a signed receipt. Neither returns ratings, materiality opinions, valuation, trading advice, or execution instructions.
 
-The OFAC endpoint performs only exact normalized lookups for a supplied crypto address, OFAC UID, or exact name. It never returns `safe`, `approved`, `cleared`, `not sanctioned`, `compliant`, or `legal to transact`; it does no fuzzy matching, ownership/control analysis, or transaction authorization.
+The OFAC preflight returns a compact decision for an exact EVM address. The premium endpoint adds full matching records, source hashes, and a signed receipt for an address, OFAC UID, or exact name. Neither returns `safe`, `approved`, `cleared`, `not sanctioned`, `compliant`, or `legal to transact`; they do no fuzzy matching, ownership/control analysis, or transaction authorization.
 
 ## Payment and Fulfilment Flow
 
@@ -22,11 +24,11 @@ The OFAC endpoint performs only exact normalized lookups for a supplied crypto a
 3. Invalid, stale, broken-source, or oversized requests fail before a payment challenge.
 4. x402 v2 returns a Bazaar-compatible HTTP 402 challenge.
 5. A compatible buyer pays and retries automatically.
-6. The already prepared result is returned with an Ed25519 receipt and source hashes.
+6. The already prepared result is returned. Premium evidence routes include an Ed25519 receipt and source hashes.
 7. A fulfilled buyer can replay the stored result with the original `Payment-Signature` at `/v1/evidence/replay/{request_id}` without a second charge.
 
 For directory and uptime monitoring, an empty unauthenticated `POST` is a
-supported probe for both paid routes. It uses the route's published Bazaar
+supported probe for all paid routes. It uses the route's published Bazaar
 example request and returns the normal 402 challenge. A literal `{}`, malformed
 JSON, or any other schema-invalid non-empty body is still rejected before the
 payment layer.
@@ -94,7 +96,9 @@ export AUTONOMOUS_X402_NETWORK=eip155:84532
 export AUTONOMOUS_X402_PAY_TO=0xYourTestWalletAddress
 export AUTONOMOUS_X402_FACILITATOR_URL=https://x402.org/facilitator
 export AUTONOMOUS_X402_SEC_PRICE='$0.10'
+export AUTONOMOUS_X402_SEC_SIGNAL_PRICE='$0.01'
 export AUTONOMOUS_X402_OFAC_PRICE='$0.05'
+export AUTONOMOUS_X402_OFAC_PREFLIGHT_PRICE='$0.01'
 ```
 
 Testnet proves technical readiness only. It does not count as demand, revenue, a payer, repeat use, or retention.

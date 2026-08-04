@@ -4,14 +4,14 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Official Source Evidence - SEC and OFAC APIs for Agents</title>
-    <meta name="description" content="Pay-per-call SEC EDGAR filing deltas and exact OFAC identifier evidence with official-source hashes and signed receipts. No API key required.">
+    <meta name="description" content="Decision-ready SEC filing and OFAC address checks from $0.01, plus source-hashed evidence and signed receipts. No API key required.">
     <meta name="robots" content="index,follow">
     <link rel="canonical" href="https://evidence.regulavita.com/">
     <link rel="icon" href="/favicon.ico">
     <link rel="alternate" type="application/json" href="/.well-known/agent-service.json" title="Agent service manifest">
     <meta property="og:type" content="website">
     <meta property="og:title" content="Official Source Evidence">
-    <meta property="og:description" content="Source-hashed SEC and OFAC evidence, payable per call by autonomous agents over x402.">
+    <meta property="og:description" content="Decision-ready SEC and OFAC checks from $0.01, payable per call by autonomous agents over x402.">
     <meta property="og:url" content="https://evidence.regulavita.com/">
     <meta property="og:image" content="https://evidence.regulavita.com/icon.png">
     <meta name="twitter:card" content="summary">
@@ -21,11 +21,13 @@
         "@type": "SoftwareApplication",
         "name": "Official Source Evidence",
         "applicationCategory": "DeveloperApplication",
-        "description": "Pay-per-call SEC EDGAR filing deltas and exact OFAC identifier evidence with official-source hashes and signed receipts.",
+        "description": "Decision-ready SEC filing and OFAC address checks from $0.01, plus source-hashed evidence and signed receipts.",
         "url": "https://evidence.regulavita.com/",
         "image": "https://evidence.regulavita.com/icon.png",
-        "provider": {"@type": "Organization", "name": "ITI Studio"},
+        "provider": {"@type": "Organization", "name": "Regulavita"},
         "offers": [
+          {"@type": "Offer", "name": "OFAC payment preflight", "price": "0.01", "priceCurrency": "USD"},
+          {"@type": "Offer", "name": "SEC filing change signal", "price": "0.01", "priceCurrency": "USD"},
           {"@type": "Offer", "name": "OFAC exact identifier evidence", "price": "0.05", "priceCurrency": "USD"},
           {"@type": "Offer", "name": "SEC filing trigger delta", "price": "0.10", "priceCurrency": "USD"}
         ]
@@ -377,7 +379,7 @@
         <div class="shell">
           <div class="eyebrow"><span class="live-dot"></span>Live on Base mainnet</div>
           <h1>Official Source Evidence</h1>
-          <p class="lead">Source-hashed SEC filing deltas and exact OFAC identifier evidence, delivered to autonomous agents through x402. No account, API key, or subscription.</p>
+          <p class="lead">Check a payment address or SEC filing state for $0.01, then buy signed source evidence only when the decision needs proof. Built for autonomous agents with no account, API key, or subscription.</p>
           <div class="actions">
             <a class="action" href="/docs">Open API docs</a>
             <a class="action secondary" href="/.well-known/agent-service.json">Read machine manifest</a>
@@ -396,9 +398,27 @@
         <div class="shell">
           <div class="section-heading">
             <h2>Paid endpoints</h2>
-            <p class="section-note">Strict inputs are validated and official-source freshness is checked before a payment challenge is issued.</p>
+            <p class="section-note">Start with a compact decision. Upgrade to a signed, replayable evidence bundle only when your workflow needs proof.</p>
           </div>
           <div class="endpoint-list">
+            <article class="endpoint">
+              <span class="method">POST</span>
+              <div>
+                <span class="endpoint-path">/v1/ofac/payment-preflight</span>
+                <p class="endpoint-copy">Before sending funds, check whether an exact EVM destination address appears in current official OFAC data. Returns a compact stop or no-match decision and freshness.</p>
+                <div class="endpoint-links"><a href="/v1/ofac/sample">Free sample</a><a href="/docs#/default/ofac_payment_preflight_v1_ofac_payment_preflight_post">Open schema</a></div>
+              </div>
+              <div class="price">$0.01<small>per decision</small></div>
+            </article>
+            <article class="endpoint">
+              <span class="method">POST</span>
+              <div>
+                <span class="endpoint-path">/v1/sec/filing-change-signal</span>
+                <p class="endpoint-copy">Give a stock ticker and timestamp to learn whether a new 8-K, 10-Q, or 10-K has appeared, with filing links and a cursor for the next check.</p>
+                <div class="endpoint-links"><a href="/v1/sec/sample">Free sample</a><a href="/docs#/default/sec_filing_change_signal_v1_sec_filing_change_signal_post">Open schema</a></div>
+              </div>
+              <div class="price">$0.01<small>per decision</small></div>
+            </article>
             <article class="endpoint">
               <span class="method">POST</span>
               <div>
@@ -412,7 +432,7 @@
               <span class="method">POST</span>
               <div>
                 <span class="endpoint-path">/v1/sec/filing-trigger-delta</span>
-                <p class="endpoint-copy">Detect new SEC EDGAR 8-K, 10-Q, or 10-K filings since an accession and calculate selected deterministic XBRL fact deltas with source proof.</p>
+                <p class="endpoint-copy">Use a ticker and timestamp or a CIK and accession to retrieve new SEC filings, deterministic XBRL fact deltas, source hashes, and a signed receipt.</p>
                 <div class="endpoint-links"><a href="/v1/sec/sample">Free sample</a><a href="/docs#/default/sec_filing_trigger_delta_v1_sec_filing_trigger_delta_post">Open schema</a></div>
               </div>
               <div class="price">$0.10<small>per result</small></div>
@@ -432,7 +452,7 @@
 
     <footer>
       <div class="shell footer-row">
-        <span>ITI Studio - Official Source Evidence</span>
+        <span>Regulavita - Official Source Evidence</span>
         <span>Exact evidence only. No advice, authorization, or sanctions clearance.</span>
       </div>
     </footer>

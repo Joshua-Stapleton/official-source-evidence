@@ -6,7 +6,9 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from autonomous_data_api.evidence import (
     EvidenceService,
     OfacExactRequest,
+    OfacPreflightRequest,
     SecDeltaRequest,
+    SecSignalRequest,
     SourceSnapshot,
     sha256_bytes,
 )
@@ -125,6 +127,32 @@ def test_ofac_no_match_never_claims_clearance(tmp_path, monkeypatch):
     assert '"cleared"' not in serialized
 
 
+def test_ofac_preflight_is_compact_unsigned_and_never_claims_clearance(
+    tmp_path, monkeypatch
+):
+    evidence = service(tmp_path, monkeypatch)
+    evidence.import_ofac_file("SDN", OFAC_FIXTURE)
+    evidence.import_ofac_file("CONSOLIDATED", OFAC_FIXTURE)
+
+    prepared = evidence.prepare_ofac_preflight(
+        OfacPreflightRequest(
+            address="0x0000000000000000000000000000000000000000",
+            network="eip155:8453",
+        )
+    )
+
+    assert prepared.product == "ofac_preflight"
+    assert prepared.result["decision"] == "NO_EXACT_OFAC_MATCH_FOUND"
+    assert prepared.result["match_count"] == 0
+    assert "receipt" not in prepared.result
+    assert prepared.result["premium_evidence_path"] == (
+        "/v1/ofac/exact-identifier-evidence"
+    )
+    serialized = json.dumps(prepared.result).lower()
+    assert "not sanctions clearance" in serialized
+    assert '"cleared"' not in serialized
+
+
 def make_snapshot(source_id, content):
     return SourceSnapshot(
         source_id=source_id,
@@ -218,3 +246,206 @@ def test_sec_delta_uses_accession_document_hash_and_xbrl_delta(tmp_path, monkeyp
     assert delta["previous_value"] == 100
     assert delta["current_value"] == 115
     assert first.result["provenance"]["result_sha256"] == f"sha256:{first.result_hash}"
+
+
+def test_sec_signal_resolves_ticker_and_uses_timestamp_without_receipt(
+    tmp_path, monkeypatch
+):
+    evidence = service(tmp_path, monkeypatch)
+    ticker_map = {"0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple"}}
+    submissions = {
+        "name": "Apple Inc.",
+        "tickers": ["AAPL"],
+        "filings": {
+            "recent": {
+                "accessionNumber": ["0000320193-26-000002", "0000320193-26-000001"],
+                "form": ["8-K", "10-Q"],
+                "filingDate": ["2026-08-01", "2026-07-01"],
+                "acceptanceDateTime": ["20260801114211", "20260701114211"],
+                "primaryDocument": ["current.htm", "older.htm"],
+            },
+            "files": [],
+        },
+    }
+
+    def fake_fetch(source_id, url, max_age_seconds):
+        del max_age_seconds
+        content = (
+            json.dumps(ticker_map).encode()
+            if "company_tickers" in url
+            else json.dumps(submissions).encode()
+        )
+        return make_snapshot(source_id, content)
+
+    monkeypatch.setattr(evidence, "_fetch_sec_source", fake_fetch)
+    prepared = evidence.prepare_sec_signal(
+        SecSignalRequest(
+            ticker="aapl",
+            since="2026-07-15T00:00:00Z",
+            forms=["8-K", "10-Q"],
+        )
+    )
+
+    assert prepared.product == "sec_signal"
+    assert prepared.result["decision"] == "NEW_RELEVANT_FILING"
+    assert prepared.result["issuer"]["cik"] == "0000320193"
+    assert prepared.result["filing_count"] == 1
+    assert prepared.result["filings"][0]["accession"] == "0000320193-26-000002"
+    assert prepared.result["premium_evidence_path"] == "/v1/sec/filing-trigger-delta"
+    assert "receipt" not in prepared.result
+
+
+def test_sec_premium_accepts_ticker_and_timestamp(tmp_path, monkeypatch):
+    evidence = service(tmp_path, monkeypatch)
+    ticker_map = {"0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple"}}
+    submissions = {
+        "name": "Apple Inc.",
+        "tickers": ["AAPL"],
+        "filings": {
+            "recent": {
+                "accessionNumber": ["0000320193-26-000002"],
+                "form": ["8-K"],
+                "filingDate": ["2026-08-01"],
+                "acceptanceDateTime": ["20260801114211"],
+                "reportDate": ["2026-06-30"],
+                "primaryDocument": ["current.htm"],
+                "items": ["2.02"],
+            },
+            "files": [],
+        },
+    }
+
+    def fake_fetch(source_id, url, max_age_seconds):
+        del max_age_seconds
+        if "company_tickers" in url:
+            return make_snapshot(source_id, json.dumps(ticker_map).encode())
+        if url.endswith("current.htm"):
+            return make_snapshot(source_id, b"<html>filing</html>")
+        return make_snapshot(source_id, json.dumps(submissions).encode())
+
+    monkeypatch.setattr(evidence, "_fetch_sec_source", fake_fetch)
+    prepared = evidence.prepare_sec(
+        SecDeltaRequest(
+            ticker="AAPL",
+            since="2026-07-15T00:00:00Z",
+            forms=["8-K"],
+            rules=["FORM:8-K:ITEM:2.02"],
+        )
+    )
+
+    assert prepared.result["baseline"] == {
+        "type": "timestamp",
+        "value": "2026-07-15T00:00:00+00:00",
+    }
+    assert prepared.result["issuer"]["cik"] == "0000320193"
+    assert prepared.result["filings"][0]["matched_rules"] == ["FORM:8-K:ITEM:2.02"]
+    assert "receipt" in prepared.result
+
+
+def test_conversion_experiment_excludes_probes_and_owner_payments(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("AUTONOMOUS_X402_NETWORK", "eip155:8453")
+    evidence = service(tmp_path, monkeypatch)
+    rows = [
+        (
+            "2026-08-04T10:00:00+00:00",
+            "/v1/ofac/payment-preflight",
+            "$0.01",
+            None,
+            "NON_OWNER_UNVERIFIED",
+            "PAYMENT_REQUIRED",
+        ),
+        (
+            "2026-08-04T10:01:00+00:00",
+            "/v1/ofac/payment-preflight",
+            "$0.01",
+            "buyer-a",
+            "NON_OWNER_UNVERIFIED",
+            "FULFILLED",
+        ),
+        (
+            "2026-08-05T10:01:00+00:00",
+            "/v1/ofac/payment-preflight",
+            "$0.01",
+            "buyer-a",
+            "NON_OWNER_UNVERIFIED",
+            "FULFILLED",
+        ),
+        (
+            "2026-08-04T10:02:00+00:00",
+            "/v1/sec/filing-change-signal",
+            "$0.01",
+            "buyer-b",
+            "NON_OWNER_UNVERIFIED",
+            "FULFILLED",
+        ),
+        (
+            "2026-08-04T10:03:00+00:00",
+            "/v1/sec/filing-change-signal",
+            "$0.01",
+            "buyer-c",
+            "NON_OWNER_UNVERIFIED",
+            "PAYMENT_OR_SETTLEMENT_FAILED",
+        ),
+        (
+            "2026-08-04T10:04:00+00:00",
+            "/v1/sec/filing-trigger-delta",
+            "$0.10",
+            "owner",
+            "OWNER",
+            "FULFILLED",
+        ),
+    ]
+    with evidence._connect() as connection:
+        for index, row in enumerate(rows):
+            timestamp, route, price, payer, owner_flag, response_status = row
+            connection.execute(
+                """
+                INSERT INTO evidence_attempts (
+                    request_id, timestamp_utc, route, canonical_request_hash,
+                    response_hash, source_bundle_hash, quoted_price, network,
+                    payer_wallet_hmac, owner_or_test_flag, response_status,
+                    latency_ms, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'eip155:8453', ?, ?, ?, 10, ?)
+                """,
+                (
+                    f"request-{index}",
+                    timestamp,
+                    route,
+                    "request-hash",
+                    "response-hash",
+                    "source-hash",
+                    price,
+                    payer,
+                    owner_flag,
+                    response_status,
+                    timestamp,
+                ),
+            )
+        connection.commit()
+
+    status = evidence.experiment_status("2026-08-04T09:13:21Z")
+    experiment = status["conversion_experiment"]
+
+    assert experiment["independent_buyer_clusters"] == 2
+    assert experiment["repeat_independent_buyer_clusters"] == 1
+    assert experiment["independent_fulfilled_calls"] == 3
+    assert experiment["independent_revenue_usd"] == "0.03"
+    assert experiment["independent_paid_fulfillment_rate_percent"] == 75.0
+    assert experiment["max_independent_buyer_call_share"] == 0.6667
+    preflight = next(
+        route
+        for route in experiment["routes"]
+        if route["route"] == "/v1/ofac/payment-preflight"
+    )
+    assert preflight["payment_challenges"] == 1
+    assert preflight["independent_fulfilled_calls"] == 2
+    assert preflight["repeat_independent_buyer_clusters"] == 1
+    sec_signal = next(
+        route
+        for route in experiment["routes"]
+        if route["route"] == "/v1/sec/filing-change-signal"
+    )
+    assert sec_signal["independent_paid_or_settlement_failures"] == 1
+    assert sec_signal["independent_paid_fulfillment_rate_percent"] == 50.0

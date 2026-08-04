@@ -12,15 +12,17 @@ key, subscription, or sales call.
 
 | Endpoint | Result | Price |
 | --- | --- | ---: |
+| `POST /v1/ofac/payment-preflight` | Compact stop/no-exact-match decision for an EVM destination address against current official OFAC data | $0.01 USDC |
+| `POST /v1/sec/filing-change-signal` | New SEC 8-K, 10-Q, or 10-K filings for a ticker since a timestamp, with links and a next-check cursor | $0.01 USDC |
 | `POST /v1/ofac/exact-identifier-evidence` | Exact OFAC SDN or Consolidated lookup for a crypto address, OFAC UID, or exact name, with versioned source proof | $0.05 USDC |
-| `POST /v1/sec/filing-trigger-delta` | New SEC EDGAR 8-K, 10-Q, or 10-K filings since an accession, plus selected deterministic XBRL fact deltas | $0.10 USDC |
+| `POST /v1/sec/filing-trigger-delta` | New SEC filings for a ticker and timestamp or CIK and accession, plus deterministic XBRL deltas and a signed receipt | $0.10 USDC |
 
-Both routes use x402 v2 on Base mainnet. An x402-compatible client receives a
+All four routes use x402 v2 on Base mainnet. An x402-compatible client receives a
 standard HTTP 402 challenge, pays USDC, retries automatically, and receives the
 JSON result. The production service has a hard `$10.00` accepted-revenue cap
 per UTC day.
 
-Monitoring tools may send an empty unauthenticated `POST` to either paid route.
+Monitoring tools may send an empty unauthenticated `POST` to any paid route.
 The service treats that as the published example request and returns the normal
 HTTP 402 challenge without charging. Non-empty malformed or schema-invalid
 requests are still rejected before payment.
@@ -45,12 +47,15 @@ An unpaid valid request demonstrates the machine-readable payment challenge:
 
 ```bash
 curl -i -X POST \
-  https://evidence.regulavita.com/v1/ofac/exact-identifier-evidence \
+  https://evidence.regulavita.com/v1/ofac/payment-preflight \
   -H 'Content-Type: application/json' \
-  -d '{"identifier_type":"ofac_uid","identifier":"36","lists":["SDN"]}'
+  -d '{"address":"0x0000000000000000000000000000000000000000","network":"eip155:1"}'
 ```
 
-## What a Paid Result Includes
+## Decision And Evidence Layers
+
+The two `$0.01` routes return compact, unsigned decisions for frequent agent
+workflows. The `$0.05` and `$0.10` routes add the following evidence layer:
 
 - Official publisher and source-version metadata.
 - Canonical request, source-bundle, component, and result SHA-256 hashes.
