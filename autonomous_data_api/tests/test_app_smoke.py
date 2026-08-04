@@ -23,6 +23,7 @@ from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from autonomous_data_api.app import (
+    FORM_D_PROBE_PAYLOAD,
     CdpFacilitatorAuthProvider,
     MainnetRevenueCapMiddleware,
     app,
@@ -54,6 +55,11 @@ def prepared(monkeypatch):
         )
 
     monkeypatch.setattr(evidence_service, "prepare_sec", lambda _: make("sec"))
+    monkeypatch.setattr(
+        evidence_service,
+        "prepare_form_d_funding_leads",
+        lambda _: make("form_d_funding_leads"),
+    )
     monkeypatch.setattr(
         evidence_service, "prepare_sec_signal", lambda _: make("sec_signal")
     )
@@ -122,6 +128,7 @@ def test_health_and_retired_wedges(client):
     assert health.status_code == 200
     assert health.json()["x402"]["network"] == "eip155:84532"
     assert health.json()["x402"]["prices"] == {
+        "form_d_funding_leads": "$0.05",
         "ofac_preflight": "$0.01",
         "sec_signal": "$0.01",
         "sec_delta": "$0.10",
@@ -146,6 +153,7 @@ def test_agent_manifest_promotes_only_verdict_endpoints(client):
     assert payload["openapi_url"].endswith("/openapi.json")
     assert payload["payment"]["protocol"] == "x402-v2"
     assert payload["agent_paid_endpoints"] == [
+        "http://localhost:8765/v1/gtm/form-d-funding-leads",
         "http://localhost:8765/v1/ofac/payment-preflight",
         "http://localhost:8765/v1/sec/filing-change-signal",
         "http://localhost:8765/v1/sec/filing-trigger-delta",
@@ -162,6 +170,7 @@ def test_machine_discovery_and_crawler_surfaces(client):
     assert schema["servers"] == [{"url": "http://localhost:8765"}]
 
     expected = {
+        "/v1/gtm/form-d-funding-leads": "0.050000",
         "/v1/ofac/payment-preflight": "0.010000",
         "/v1/sec/filing-change-signal": "0.010000",
         "/v1/sec/filing-trigger-delta": "0.100000",
@@ -195,6 +204,7 @@ def test_machine_discovery_and_crawler_surfaces(client):
     llms = client.get("/llms.txt")
     assert llms.status_code == 200
     assert "/v1/ofac/payment-preflight - $0.01 USDC" in llms.text
+    assert "/v1/gtm/form-d-funding-leads - $0.05 USDC" in llms.text
     assert "/v1/sec/filing-change-signal - $0.01 USDC" in llms.text
     assert "/v1/ofac/exact-identifier-evidence - $0.05 USDC" in llms.text
     assert "/v1/sec/filing-trigger-delta - $0.10 USDC" in llms.text
@@ -212,6 +222,12 @@ def test_machine_discovery_and_crawler_surfaces(client):
 @pytest.mark.parametrize(
     ("path", "body", "expected_tag", "expected_amount"),
     [
+        (
+            "/v1/gtm/form-d-funding-leads",
+            FORM_D_PROBE_PAYLOAD,
+            "funding-signal",
+            "50000",
+        ),
         (
             "/v1/ofac/payment-preflight",
             {
@@ -279,6 +295,7 @@ def test_verdict_routes_advertise_payment_and_bazaar_post_schema(
 @pytest.mark.parametrize(
     ("path", "expected_amount"),
     [
+        ("/v1/gtm/form-d-funding-leads", "50000"),
         ("/v1/ofac/payment-preflight", "10000"),
         ("/v1/sec/filing-change-signal", "10000"),
         ("/v1/sec/filing-trigger-delta", "100000"),

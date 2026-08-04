@@ -42,9 +42,11 @@ from x402.schemas import Network
 from x402.server import x402ResourceServer
 
 from autonomous_data_api.evidence import (
+    FORM_D_PARSER_VERSION,
     SEC_PARSER_VERSION,
     EvidenceError,
     EvidenceService,
+    FormDFundingLeadsRequest,
     OfacExactRequest,
     OfacPreflightRequest,
     PreparedResult,
@@ -60,6 +62,7 @@ X402_SEC_PRICE = os.getenv("AUTONOMOUS_X402_SEC_PRICE", "$0.10")
 X402_OFAC_PRICE = os.getenv("AUTONOMOUS_X402_OFAC_PRICE", "$0.05")
 X402_SEC_SIGNAL_PRICE = os.getenv("AUTONOMOUS_X402_SEC_SIGNAL_PRICE", "$0.01")
 X402_OFAC_PREFLIGHT_PRICE = os.getenv("AUTONOMOUS_X402_OFAC_PREFLIGHT_PRICE", "$0.01")
+X402_FORM_D_PRICE = os.getenv("AUTONOMOUS_X402_FORM_D_PRICE", "$0.05")
 CONVERSION_EXPERIMENT_START_UTC = os.getenv(
     "AUTONOMOUS_CONVERSION_EXPERIMENT_START_UTC", ""
 ).strip()
@@ -113,6 +116,20 @@ OFAC_PROBE_PAYLOAD = {
 OFAC_PREFLIGHT_PROBE_PAYLOAD = {
     "address": "0x0000000000000000000000000000000000000000",
     "network": "eip155:8453",
+}
+FORM_D_PROBE_PAYLOAD = {
+    "since": (
+        (datetime.now(timezone.utc) - timedelta(days=3))
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    ),
+    "states": [],
+    "industry_keywords": [],
+    "minimum_amount_sold_usd": "0",
+    "include_amendments": False,
+    "limit": 10,
+    "max_source_age_seconds": 600,
 }
 
 
@@ -184,10 +201,11 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="Official Source Evidence API",
-    version="0.4.0",
+    version="0.5.0",
     description=(
-        "Pay-per-call, source-hashed SEC EDGAR filing deltas and exact OFAC "
-        "identifier evidence for autonomous agents. No API keys or subscriptions. "
+        "Pay-per-call SEC Form D GTM signals, source-hashed EDGAR filing deltas, "
+        "and exact OFAC identifier evidence for autonomous agents. No API keys "
+        "or subscriptions. "
         "No investment advice, sanctions clearance, compliance determination, or legal advice."
     ),
     contact={"name": "Regulavita", "email": "joshua@regulavita.com"},
@@ -254,6 +272,119 @@ x402_server = x402ResourceServer(x402_facilitator)
 x402_server.register(X402_NETWORK, ExactEvmServerScheme())
 
 x402_routes: dict[str, RouteConfig] = {
+    "POST /v1/gtm/form-d-funding-leads": RouteConfig(
+        accepts=[
+            PaymentOption(
+                scheme="exact",
+                pay_to=X402_PAY_TO,
+                price=X402_FORM_D_PRICE,
+                network=X402_NETWORK,
+            )
+        ],
+        mime_type="application/json",
+        description=(
+            "Find newly filed SEC Form D private-offering signals for autonomous "
+            "GTM workflows. Filter by issuer state, industry keyword, and reported "
+            "amount sold. Returns official links, company context, related people, "
+            "and a cursor. Form D is a notice, not proof of total funding raised."
+        ),
+        service_name="Official Source Evidence",
+        tags=[
+            "sec",
+            "form-d",
+            "funding-signal",
+            "sales-trigger",
+            "gtm",
+            "lead-generation",
+            "private-company",
+            "cursor",
+        ],
+        icon_url=SERVICE_ICON_URL,
+        extensions=get_discovery_extension(
+            method="POST",
+            input=FORM_D_PROBE_PAYLOAD,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "since": {
+                        "type": "string",
+                        "format": "date-time",
+                        "description": "UTC baseline within the last 14 days.",
+                    },
+                    "cursor": {
+                        "type": "string",
+                        "pattern": "^[0-9]{10}-[0-9]{2}-[0-9]{6}$",
+                        "description": "The next_cursor from the previous page.",
+                    },
+                    "states": {
+                        "type": "array",
+                        "items": {"type": "string", "pattern": "^[A-Z]{2}$"},
+                        "maxItems": 20,
+                    },
+                    "industry_keywords": {
+                        "type": "array",
+                        "items": {"type": "string", "maxLength": 64},
+                        "maxItems": 10,
+                    },
+                    "minimum_amount_sold_usd": {
+                        "type": ["number", "string"],
+                        "minimum": 0,
+                    },
+                    "include_amendments": {"type": "boolean", "default": False},
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 25,
+                        "default": 10,
+                    },
+                    "max_source_age_seconds": {
+                        "type": "integer",
+                        "minimum": 60,
+                        "maximum": 3600,
+                    },
+                },
+                "required": ["since"],
+                "additionalProperties": False,
+            },
+            output=OutputConfig(
+                example={
+                    "request_id": "form_d_funding_leads_example",
+                    "decision": "FORM_D_FUNDING_SIGNALS_FOUND",
+                    "lead_count": 1,
+                    "leads": [],
+                    "pagination": {"next_cursor": None, "has_more": False},
+                    "provenance": {"parser_version": FORM_D_PARSER_VERSION},
+                    "receipt": {"algorithm": "Ed25519"},
+                },
+                schema={
+                    "type": "object",
+                    "required": [
+                        "request_id",
+                        "decision",
+                        "lead_count",
+                        "leads",
+                        "pagination",
+                        "provenance",
+                        "receipt",
+                    ],
+                    "properties": {
+                        "request_id": {"type": "string"},
+                        "decision": {
+                            "enum": [
+                                "FORM_D_FUNDING_SIGNALS_FOUND",
+                                "NO_MATCHING_FORM_D_FUNDING_SIGNALS",
+                            ]
+                        },
+                        "lead_count": {"type": "integer"},
+                        "leads": {"type": "array"},
+                        "pagination": {"type": "object"},
+                        "provenance": {"type": "object"},
+                        "receipt": {"type": "object"},
+                    },
+                },
+            ),
+        ),
+    ),
     "POST /v1/ofac/payment-preflight": RouteConfig(
         accepts=[
             PaymentOption(
@@ -658,6 +789,12 @@ def find_wallet(value: Any) -> str | None:
 
 class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
     ROUTES: ClassVar[dict[str, tuple[type[BaseModel], str, str, dict[str, Any]]]] = {
+        "/v1/gtm/form-d-funding-leads": (
+            FormDFundingLeadsRequest,
+            "prepare_form_d_funding_leads",
+            X402_FORM_D_PRICE,
+            FORM_D_PROBE_PAYLOAD,
+        ),
         "/v1/ofac/payment-preflight": (
             OfacPreflightRequest,
             "prepare_ofac_preflight",
@@ -930,6 +1067,7 @@ app.add_middleware(
     network=X402_NETWORK,
     daily_cap=X402_DAILY_REVENUE_CAP_USD,
     route_prices={
+        ("POST", "/v1/gtm/form-d-funding-leads"): price_decimal(X402_FORM_D_PRICE),
         ("POST", "/v1/ofac/payment-preflight"): price_decimal(
             X402_OFAC_PREFLIGHT_PRICE
         ),
@@ -978,6 +1116,7 @@ def health() -> dict[str, Any]:
         "x402": {
             "network": X402_NETWORK,
             "prices": {
+                "form_d_funding_leads": X402_FORM_D_PRICE,
                 "ofac_preflight": X402_OFAC_PREFLIGHT_PRICE,
                 "sec_signal": X402_SEC_SIGNAL_PRICE,
                 "ofac_exact": X402_OFAC_PRICE,
@@ -1043,7 +1182,14 @@ def x402list_ownership_proof() -> PlainTextResponse:
 @app.get("/sitemap.xml", include_in_schema=False)
 def sitemap() -> Response:
     base_url = PUBLIC_BASE_URL.rstrip("/")
-    urls = ("/", "/docs", "/openapi.json", "/v1/sec/sample", "/v1/ofac/sample")
+    urls = (
+        "/",
+        "/docs",
+        "/openapi.json",
+        "/v1/gtm/form-d-funding-leads/sample",
+        "/v1/sec/sample",
+        "/v1/ofac/sample",
+    )
     entries = "".join(f"<url><loc>{base_url}{path}</loc></url>" for path in urls)
     return Response(
         '<?xml version="1.0" encoding="UTF-8"?>'
@@ -1061,6 +1207,7 @@ def llms_txt() -> PlainTextResponse:
 Pay-per-call official-source evidence for autonomous agents. No account, API key, or subscription.
 
 ## Paid endpoints
+- POST {base_url}/v1/gtm/form-d-funding-leads - $0.05 USDC. Find newly filed SEC Form D private-offering signals for GTM workflows. Filter by issuer state, industry keyword, and reported amount sold; returns official links, related people, and a cursor.
 - POST {base_url}/v1/ofac/payment-preflight - $0.01 USDC. Before sending funds, check whether an exact EVM destination address appears in current official OFAC SDN or Consolidated data. Compact decision output; no signed receipt.
 - POST {base_url}/v1/sec/filing-change-signal - $0.01 USDC. Check a ticker or CIK for a new 8-K, 10-Q, or 10-K after a timestamp. Compact filing signal and next-check cursor; no signed receipt.
 - POST {base_url}/v1/ofac/exact-identifier-evidence - $0.05 USDC. Premium exact OFAC evidence with source versions, hashes, matching records, limitations, and an Ed25519-signed receipt.
@@ -1070,11 +1217,12 @@ Pay-per-call official-source evidence for autonomous agents. No account, API key
 - OpenAPI: {base_url}/openapi.json
 - Agent manifest: {base_url}/.well-known/agent-service.json
 - Interactive docs: {base_url}/docs
+- Form D sample: {base_url}/v1/gtm/form-d-funding-leads/sample
 - OFAC sample: {base_url}/v1/ofac/sample
 - SEC sample: {base_url}/v1/sec/sample
 
 ## Boundaries
-Exact source evidence only. No fuzzy sanctions screening, sanctions clearance, transaction authorization, materiality opinion, investment advice, or legal advice.
+Exact source evidence and factual GTM signals only. Form D is a notice, not proof of total funding raised. No fuzzy sanctions screening, sanctions clearance, transaction authorization, materiality opinion, investment advice, or legal advice.
 """
     )
 
@@ -1085,8 +1233,8 @@ def agent_manifest() -> dict[str, Any]:
     return {
         "name": "Official Source Evidence API",
         "description": (
-            "Pay-per-call OFAC payment preflight and SEC filing-change decisions, "
-            "plus premium signed official-source evidence receipts."
+            "Pay-per-call SEC Form D GTM signals, OFAC payment preflight, and SEC "
+            "filing-change decisions, plus signed official-source receipts."
         ),
         "contact": "joshua@regulavita.com",
         "icon_url": SERVICE_ICON_URL,
@@ -1095,6 +1243,7 @@ def agent_manifest() -> dict[str, Any]:
             "protocol": "x402-v2",
             "network": X402_NETWORK,
             "prices": {
+                "/v1/gtm/form-d-funding-leads": X402_FORM_D_PRICE,
                 "/v1/ofac/payment-preflight": X402_OFAC_PREFLIGHT_PRICE,
                 "/v1/sec/filing-change-signal": X402_SEC_SIGNAL_PRICE,
                 "/v1/sec/filing-trigger-delta": X402_SEC_PRICE,
@@ -1110,10 +1259,12 @@ def agent_manifest() -> dict[str, Any]:
         "openapi_url": f"{base_url}/openapi.json",
         "llms_url": f"{base_url}/llms.txt",
         "sample_endpoints": [
+            f"{base_url}/v1/gtm/form-d-funding-leads/sample",
             f"{base_url}/v1/sec/sample",
             f"{base_url}/v1/ofac/sample",
         ],
         "agent_paid_endpoints": [
+            f"{base_url}/v1/gtm/form-d-funding-leads",
             f"{base_url}/v1/ofac/payment-preflight",
             f"{base_url}/v1/sec/filing-change-signal",
             f"{base_url}/v1/sec/filing-trigger-delta",
@@ -1121,8 +1272,56 @@ def agent_manifest() -> dict[str, Any]:
         ],
         "status_endpoint": f"{base_url}/v1/experiments/status",
         "boundaries": [
+            "Form D is an issuer-filed notice, not proof of the total funding raised.",
             "No investment advice or materiality opinion.",
             "No sanctions clearance, transaction authorization, or fuzzy screening.",
+        ],
+    }
+
+
+@app.get("/v1/gtm/form-d-funding-leads/sample")
+def form_d_funding_leads_sample() -> dict[str, Any]:
+    return {
+        "sample_type": "static_contract_fixture",
+        "as_of": "2026-08-04",
+        "live_source_result": False,
+        "endpoint": {
+            "path": "/v1/gtm/form-d-funding-leads",
+            "price": X402_FORM_D_PRICE,
+            "payment": "x402 v2 USDC on Base",
+        },
+        "request": {
+            "since": "2026-08-03T00:00:00Z",
+            "states": ["CA", "NY"],
+            "industry_keywords": ["technology", "health care"],
+            "minimum_amount_sold_usd": "1000000",
+            "include_amendments": False,
+            "limit": 10,
+        },
+        "response_shape": {
+            "decision": (
+                "FORM_D_FUNDING_SIGNALS_FOUND | NO_MATCHING_FORM_D_FUNDING_SIGNALS"
+            ),
+            "leads": [
+                {
+                    "trigger": "NEW_SEC_FORM_D_FILING",
+                    "issuer": {"cik": "0000000000", "name": "Example Issuer"},
+                    "industry": "Technology",
+                    "funding_signal": {
+                        "basis": "FORM_D_REPORTED_EXEMPT_OFFERING",
+                        "amount_sold_usd": "2500000",
+                        "date_of_first_sale": "2026-08-01",
+                    },
+                    "related_people": [],
+                    "official_source_urls": {},
+                }
+            ],
+            "pagination": {"next_cursor": None, "has_more": False},
+            "provenance": {"parser_version": FORM_D_PARSER_VERSION},
+            "receipt": {"algorithm": "Ed25519"},
+        },
+        "limitations": [
+            "Form D is an issuer-filed notice, not proof that the total offering amount was raised."
         ],
     }
 
@@ -1208,6 +1407,18 @@ def ofac_sample() -> dict[str, Any]:
     }
 
 
+@app.post("/v1/gtm/form-d-funding-leads")
+def form_d_funding_leads(
+    request: Request,
+    payload: FormDFundingLeadsRequest | None = None,
+) -> dict[str, Any]:
+    del payload
+    prepared: PreparedResult | None = getattr(request.state, "evidence_prepared", None)
+    if prepared is None:
+        raise HTTPException(status_code=503, detail="Prepared result unavailable")
+    return prepared.result
+
+
 @app.post("/v1/ofac/payment-preflight")
 def ofac_payment_preflight(
     request: Request,
@@ -1282,6 +1493,7 @@ def summary() -> dict[str, Any]:
     return {
         "service": "Official Source Evidence API",
         "products": [
+            "/v1/gtm/form-d-funding-leads",
             "/v1/ofac/payment-preflight",
             "/v1/sec/filing-change-signal",
             "/v1/sec/filing-trigger-delta",
@@ -1358,7 +1570,9 @@ def custom_openapi() -> dict[str, Any]:
         "email": "joshua@regulavita.com",
     }
     schema["info"]["x-guidance"] = (
-        "Use POST /v1/ofac/payment-preflight before sending funds to an EVM "
+        "Use POST /v1/gtm/form-d-funding-leads for cursor-based private-company "
+        "sales triggers derived from official SEC Form D notices. Use POST "
+        "/v1/ofac/payment-preflight before sending funds to an EVM "
         "address. Use POST /v1/sec/filing-change-signal to check a ticker since "
         "a timestamp. These compact decision routes cost $0.01. Buy the matching "
         "premium route only when document/source hashes, detailed records, XBRL "
@@ -1368,6 +1582,15 @@ def custom_openapi() -> dict[str, Any]:
     )
 
     paid_operations: dict[str, dict[str, Any]] = {
+        "/v1/gtm/form-d-funding-leads": {
+            "price": f"{price_decimal(X402_FORM_D_PRICE):.6f}",
+            "example": FORM_D_PROBE_PAYLOAD,
+            "description": (
+                "Cursor-based SEC Form D private-offering signals for autonomous "
+                "GTM workflows, with reported amount sold, related people, and "
+                "official filing links."
+            ),
+        },
         "/v1/ofac/payment-preflight": {
             "price": f"{price_decimal(X402_OFAC_PREFLIGHT_PRICE):.6f}",
             "example": OFAC_PREFLIGHT_PROBE_PAYLOAD,
@@ -1406,6 +1629,16 @@ def custom_openapi() -> dict[str, Any]:
     sec_properties["cik"]["example"] = "0000320193"
     sec_properties["since"]["example"] = "2026-07-30T00:00:00Z"
     sec_properties["since_accession"]["example"] = "0000320193-26-000018"
+    form_d_properties = schema["components"]["schemas"]["FormDFundingLeadsRequest"][
+        "properties"
+    ]
+    form_d_properties["since"]["example"] = "2026-08-03T00:00:00Z"
+    form_d_properties["states"]["example"] = ["CA", "NY"]
+    form_d_properties["industry_keywords"]["example"] = [
+        "technology",
+        "health care",
+    ]
+    form_d_properties["minimum_amount_sold_usd"]["example"] = "1000000"
     for path, path_item in schema.get("paths", {}).items():
         for method, operation in path_item.items():
             if method not in {"get", "post", "put", "patch", "delete", "head"}:

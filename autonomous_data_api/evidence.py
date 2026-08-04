@@ -12,7 +12,7 @@ import sqlite3
 import unicodedata
 import zlib
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Literal
@@ -33,6 +33,8 @@ SEC_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
 SEC_COMPANYFACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
 SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 SEC_ARCHIVES_ROOT = "https://www.sec.gov/Archives/edgar/data"
+SEC_DAILY_INDEX_ROOT = "https://www.sec.gov/Archives/edgar/daily-index"
+SEC_ARCHIVES_BASE = "https://www.sec.gov/Archives"
 OFAC_SOURCE_URLS = {
     "SDN": (
         "https://sanctionslistservice.ofac.treas.gov/api/"
@@ -44,10 +46,14 @@ OFAC_SOURCE_URLS = {
     ),
 }
 SEC_PARSER_VERSION = "sec-trigger-delta/0.2.0"
+FORM_D_PARSER_VERSION = "sec-form-d-funding-leads/0.1.0"
 OFAC_PARSER_VERSION = "ofac-exact/0.2.0"
 OFAC_FRESHNESS_SECONDS = 900
 MAX_SEC_FILINGS = 10
 MAX_SEC_SUPPLEMENTAL_FILES = 5
+MAX_FORM_D_LOOKBACK_DAYS = 14
+MAX_FORM_D_SCAN_PER_REQUEST = 25
+MAX_FORM_D_RELATED_PEOPLE = 12
 
 
 def utc_now() -> str:
@@ -225,6 +231,54 @@ class SecSignalRequest(SecIssuerRequest):
     @classmethod
     def unique_forms(cls, value: list[str]) -> list[str]:
         return list(dict.fromkeys(value))
+
+
+class FormDFundingLeadsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    since: str
+    cursor: str | None = Field(
+        default=None,
+        pattern=r"^\d{10}-\d{2}-\d{6}$",
+        description="Accession returned as next_cursor by a previous call.",
+    )
+    states: list[str] = Field(default_factory=list, max_length=20)
+    industry_keywords: list[str] = Field(default_factory=list, max_length=10)
+    minimum_amount_sold_usd: Decimal = Field(default=Decimal(0), ge=0)
+    include_amendments: bool = False
+    limit: int = Field(default=10, ge=1, le=25)
+    max_source_age_seconds: int = Field(default=600, ge=60, le=3600)
+
+    @field_validator("since", mode="before")
+    @classmethod
+    def normalize_since(cls, value: Any) -> str:
+        normalized = normalize_since_timestamp(value)
+        baseline = parse_utc(normalized).astimezone(timezone.utc)
+        if datetime.now(timezone.utc) - baseline > timedelta(
+            days=MAX_FORM_D_LOOKBACK_DAYS
+        ):
+            raise ValueError(
+                f"since must be within the last {MAX_FORM_D_LOOKBACK_DAYS} days"
+            )
+        return normalized
+
+    @field_validator("states")
+    @classmethod
+    def normalize_states(cls, value: list[str]) -> list[str]:
+        cleaned = list(dict.fromkeys(item.strip().upper() for item in value))
+        if any(not re.fullmatch(r"[A-Z]{2}", item) for item in cleaned):
+            raise ValueError("states must be two-letter US postal abbreviations")
+        return cleaned
+
+    @field_validator("industry_keywords")
+    @classmethod
+    def normalize_industry_keywords(cls, value: list[str]) -> list[str]:
+        cleaned = list(
+            dict.fromkeys(" ".join(item.strip().split()).casefold() for item in value)
+        )
+        if any(not item or len(item) > 64 for item in cleaned):
+            raise ValueError("industry keywords must contain 1-64 characters")
+        return cleaned
 
 
 class OfacExactRequest(BaseModel):
@@ -954,6 +1008,265 @@ class EvidenceService:
         return f"{SEC_ARCHIVES_ROOT}/{int(cik)}/{accession_path}/{primary_document}"
 
     @staticmethod
+    def _form_d_index_url(index_date: date) -> str:
+        quarter = ((index_date.month - 1) // 3) + 1
+        return (
+            f"{SEC_DAILY_INDEX_ROOT}/{index_date.year}/QTR{quarter}/"
+            f"master.{index_date:%Y%m%d}.idx"
+        )
+
+    @staticmethod
+    def _parse_form_d_index(content: bytes) -> list[dict[str, str]]:
+        rows: list[dict[str, str]] = []
+        try:
+            text = content.decode("latin-1")
+        except UnicodeDecodeError as exc:
+            raise SourceSchemaError(f"SEC daily index decoding failed: {exc}") from exc
+        for line in text.splitlines():
+            parts = line.split("|", 4)
+            if len(parts) != 5:
+                continue
+            cik, company_name, form, filed_date, filename = parts
+            if form not in {"D", "D/A"}:
+                continue
+            accession_match = re.search(r"(\d{10}-\d{2}-\d{6})\.txt$", filename)
+            if (
+                not accession_match
+                or not cik.isdigit()
+                or not re.fullmatch(r"\d{8}", filed_date)
+                or not filename.startswith("edgar/data/")
+            ):
+                raise SourceSchemaError(
+                    "SEC daily index contained an invalid Form D row"
+                )
+            rows.append(
+                {
+                    "cik": cik.zfill(10),
+                    "company_name": company_name.strip(),
+                    "form": form,
+                    "filed_date": filed_date,
+                    "filename": filename,
+                    "accession": accession_match.group(1),
+                }
+            )
+        return rows
+
+    @staticmethod
+    def _form_d_money(root: Any, name: str) -> Decimal | None:
+        element = root.find(f".//{{*}}{name}")
+        if element is None or element.text is None:
+            return None
+        raw = element.text.strip()
+        if not raw:
+            return None
+        try:
+            return Decimal(raw)
+        except InvalidOperation:
+            return None
+
+    @staticmethod
+    def _form_d_bool(root: Any, name: str) -> bool:
+        element = root.find(f".//{{*}}{name}")
+        return bool(
+            element is not None
+            and element.text
+            and element.text.strip().casefold() == "true"
+        )
+
+    @staticmethod
+    def _form_d_descendant_text(root: Any, name: str) -> str | None:
+        element = root.find(f".//{{*}}{name}")
+        if element is None or element.text is None:
+            return None
+        value = " ".join(element.text.strip().split())
+        return value or None
+
+    @classmethod
+    def _parse_form_d_submission(
+        cls,
+        content: bytes,
+        row: dict[str, str],
+        filing_txt_url: str,
+    ) -> dict[str, Any]:
+        xml_match = re.search(
+            rb"(<edgarSubmission\b.*?</edgarSubmission>)",
+            content,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        if not xml_match:
+            raise SourceSchemaError(
+                f"SEC Form D {row['accession']} contained no edgarSubmission XML"
+            )
+        try:
+            root = ElementTree.fromstring(xml_match.group(1))
+        except Exception as exc:
+            raise SourceSchemaError(
+                f"SEC Form D {row['accession']} XML parsing failed: {exc}"
+            ) from exc
+
+        accepted_match = re.search(rb"<ACCEPTANCE-DATETIME>(\d{14})", content)
+        accepted_at = (
+            datetime.strptime(accepted_match.group(1).decode(), "%Y%m%d%H%M%S")
+            .replace(tzinfo=timezone.utc)
+            .isoformat()
+            if accepted_match
+            else datetime.strptime(row["filed_date"], "%Y%m%d")
+            .replace(tzinfo=timezone.utc)
+            .isoformat()
+        )
+        primary_filename_match = re.search(
+            rb"<FILENAME>([A-Za-z0-9_.-]+\.xml)", content, flags=re.IGNORECASE
+        )
+        primary_filename = (
+            primary_filename_match.group(1).decode("ascii")
+            if primary_filename_match
+            else "primary_doc.xml"
+        )
+        accession_path = row["accession"].replace("-", "")
+        primary_document_url = (
+            f"{SEC_ARCHIVES_ROOT}/{int(row['cik'])}/{accession_path}/{primary_filename}"
+        )
+
+        issuer = root.find(".//{*}primaryIssuer")
+        address = issuer.find(".//{*}issuerAddress") if issuer is not None else None
+        industry = cls._form_d_descendant_text(root, "industryGroupType")
+        total_offering = cls._form_d_money(root, "totalOfferingAmount")
+        amount_sold = cls._form_d_money(root, "totalAmountSold")
+        amount_remaining = cls._form_d_money(root, "totalRemaining")
+        minimum_investment = cls._form_d_money(root, "minimumInvestmentAccepted")
+        first_sale_element = root.find(".//{*}dateOfFirstSale/{*}value")
+        first_sale_date = (
+            first_sale_element.text.strip()
+            if first_sale_element is not None and first_sale_element.text
+            else None
+        )
+        investor_count_text = cls._form_d_descendant_text(
+            root, "totalNumberAlreadyInvested"
+        )
+        investor_count = (
+            int(investor_count_text)
+            if investor_count_text and investor_count_text.isdigit()
+            else None
+        )
+
+        security_flags = {
+            "equity": "isEquityType",
+            "debt": "isDebtType",
+            "option_or_warrant": "isOptionToAcquireType",
+            "pooled_investment_fund": "isPooledInvestmentFundType",
+            "tenant_in_common": "isTenantInCommonType",
+            "mineral_property": "isMineralPropertyType",
+            "other": "isOtherType",
+        }
+        securities = [
+            label
+            for label, tag in security_flags.items()
+            if cls._form_d_bool(root, tag)
+        ]
+
+        related_people: list[dict[str, Any]] = []
+        for person in root.findall(".//{*}relatedPersonInfo"):
+            name_element = person.find(".//{*}relatedPersonName")
+            name_parts = (
+                [
+                    _xml_text(name_element, "firstName"),
+                    _xml_text(name_element, "middleName"),
+                    _xml_text(name_element, "lastName"),
+                ]
+                if name_element is not None
+                else []
+            )
+            roles = sorted(
+                {
+                    item.text.strip()
+                    for item in person.findall(".//{*}relationship")
+                    if item.text and item.text.strip()
+                }
+            )
+            full_name = " ".join(part for part in name_parts if part)
+            if full_name:
+                related_people.append({"name": full_name, "roles": roles})
+
+        def money_string(value: Decimal | None) -> str | None:
+            return format(value, "f") if value is not None else None
+
+        return {
+            "trigger": "NEW_SEC_FORM_D_FILING",
+            "accession": row["accession"],
+            "filing_type": row["form"],
+            "filed_at": accepted_at,
+            "issuer": {
+                "cik": row["cik"],
+                "name": (
+                    cls._form_d_descendant_text(issuer, "entityName")
+                    if issuer is not None
+                    else None
+                )
+                or row["company_name"],
+                "entity_type": cls._form_d_descendant_text(root, "entityType"),
+                "jurisdiction_of_incorporation": cls._form_d_descendant_text(
+                    root, "jurisdictionOfInc"
+                ),
+                "location": {
+                    "city": _xml_text(address, "city") if address is not None else None,
+                    "state_or_country": (
+                        _xml_text(address, "stateOrCountry")
+                        if address is not None
+                        else None
+                    ),
+                    "postal_code": (
+                        _xml_text(address, "zipCode") if address is not None else None
+                    ),
+                },
+            },
+            "industry": industry,
+            "funding_signal": {
+                "basis": "FORM_D_REPORTED_EXEMPT_OFFERING",
+                "total_offering_amount_usd": money_string(total_offering),
+                "amount_sold_usd": money_string(amount_sold),
+                "amount_remaining_usd": money_string(amount_remaining),
+                "offering_amount_indefinite": cls._form_d_bool(root, "isIndefinite"),
+                "date_of_first_sale": first_sale_date,
+                "minimum_investment_usd": money_string(minimum_investment),
+                "investor_count": investor_count,
+                "securities": securities,
+            },
+            "related_people": related_people[:MAX_FORM_D_RELATED_PEOPLE],
+            "related_people_truncated": len(related_people) > MAX_FORM_D_RELATED_PEOPLE,
+            "official_source_urls": {
+                "filing_submission": filing_txt_url,
+                "primary_document": primary_document_url,
+            },
+        }
+
+    @staticmethod
+    def _form_d_matches(
+        lead: dict[str, Any], request: FormDFundingLeadsRequest
+    ) -> bool:
+        state = str(lead["issuer"]["location"].get("state_or_country") or "").upper()
+        if request.states and state not in set(request.states):
+            return False
+        industry = str(lead.get("industry") or "").casefold()
+        if request.industry_keywords and not any(
+            keyword in industry for keyword in request.industry_keywords
+        ):
+            return False
+        amount_sold = lead["funding_signal"].get("amount_sold_usd")
+        try:
+            parsed_amount_sold = (
+                Decimal(amount_sold) if amount_sold is not None else None
+            )
+        except InvalidOperation:
+            parsed_amount_sold = None
+        return bool(
+            request.minimum_amount_sold_usd == 0
+            or (
+                parsed_amount_sold is not None
+                and parsed_amount_sold >= request.minimum_amount_sold_usd
+            )
+        )
+
+    @staticmethod
     def _selected_fact_deltas(
         companyfacts: dict[str, Any],
         rules: list[str],
@@ -1169,6 +1482,178 @@ class EvidenceService:
         if prepared is None:
             raise SourceSchemaError("failed to persist prepared result")
         return prepared
+
+    def prepare_form_d_funding_leads(
+        self, request: FormDFundingLeadsRequest
+    ) -> PreparedResult:
+        request_payload = request.model_dump(mode="json")
+        request_hash = sha256_json(request_payload)
+        baseline = parse_utc(request.since).astimezone(timezone.utc)
+        today = datetime.now(timezone.utc).date()
+        index_start = min(baseline.date(), today - timedelta(days=3))
+
+        index_snapshots: list[SourceSnapshot] = []
+        index_urls: list[str] = []
+        index_dates: list[str] = []
+        rows: list[dict[str, str]] = []
+        current_date = index_start
+        while current_date <= today:
+            if current_date.weekday() < 5:
+                index_url = self._form_d_index_url(current_date)
+                try:
+                    snapshot = self._fetch_sec_source(
+                        f"sec:daily-master:{current_date:%Y%m%d}",
+                        index_url,
+                        request.max_source_age_seconds,
+                    )
+                except SourceStaleError as exc:
+                    if current_date == today or any(
+                        status in exc.detail for status in ("403", "404")
+                    ):
+                        current_date += timedelta(days=1)
+                        continue
+                    raise
+                index_snapshots.append(snapshot)
+                index_urls.append(index_url)
+                index_dates.append(current_date.isoformat())
+                rows.extend(self._parse_form_d_index(snapshot.content))
+            current_date += timedelta(days=1)
+
+        if not index_snapshots:
+            raise SourceStaleError(
+                "No SEC daily master index was available for the requested window"
+            )
+
+        allowed_forms = {"D", "D/A"} if request.include_amendments else {"D"}
+        baseline_date = baseline.strftime("%Y%m%d")
+        candidates = sorted(
+            (
+                row
+                for row in rows
+                if row["form"] in allowed_forms and row["filed_date"] >= baseline_date
+            ),
+            key=lambda row: (row["filed_date"], row["accession"]),
+            reverse=True,
+        )
+        if request.cursor:
+            cursor_index = next(
+                (
+                    index
+                    for index, row in enumerate(candidates)
+                    if row["accession"] == request.cursor
+                ),
+                None,
+            )
+            if cursor_index is None:
+                raise ContractError(
+                    "CURSOR_NOT_AVAILABLE",
+                    "cursor was not found in the bounded SEC Form D window",
+                )
+            candidates = candidates[cursor_index + 1 :]
+
+        source_snapshots = list(index_snapshots)
+        leads: list[dict[str, Any]] = []
+        parse_failure_accessions: list[str] = []
+        scanned_rows: list[dict[str, str]] = []
+        for row in candidates[:MAX_FORM_D_SCAN_PER_REQUEST]:
+            scanned_rows.append(row)
+            filing_txt_url = f"{SEC_ARCHIVES_BASE}/{row['filename']}"
+            filing_snapshot = self._fetch_sec_source(
+                f"sec:form-d-submission:{row['accession']}",
+                filing_txt_url,
+                request.max_source_age_seconds,
+            )
+            source_snapshots.append(filing_snapshot)
+            try:
+                lead = self._parse_form_d_submission(
+                    filing_snapshot.content,
+                    row,
+                    filing_txt_url,
+                )
+            except SourceSchemaError:
+                parse_failure_accessions.append(row["accession"])
+                continue
+            if parse_utc(lead["filed_at"]) <= baseline:
+                continue
+            if not self._form_d_matches(lead, request):
+                continue
+            leads.append(lead)
+            if len(leads) >= request.limit:
+                break
+
+        scanned_count = len(scanned_rows)
+        has_more = scanned_count < len(candidates)
+        next_cursor = (
+            scanned_rows[-1]["accession"] if has_more and scanned_rows else None
+        )
+        source_payload_hash = sha256_json(
+            sorted({snapshot.content_sha256 for snapshot in source_snapshots})
+        )
+        source_bundle_hash = sha256_json(
+            {
+                "parser_version": FORM_D_PARSER_VERSION,
+                "source_payload_hash": source_payload_hash,
+            }
+        )
+        cached = self._cached_prepared(
+            "form_d_funding_leads", request_hash, source_bundle_hash
+        )
+        if cached:
+            return cached
+
+        source_snapshot_at = max(snapshot.retrieved_at for snapshot in source_snapshots)
+        result_core = {
+            "decision": (
+                "FORM_D_FUNDING_SIGNALS_FOUND"
+                if leads
+                else "NO_MATCHING_FORM_D_FUNDING_SIGNALS"
+            ),
+            "lead_count": len(leads),
+            "leads": leads,
+            "filters": {
+                "states": request.states,
+                "industry_keywords": request.industry_keywords,
+                "minimum_amount_sold_usd": format(request.minimum_amount_sold_usd, "f"),
+                "include_amendments": request.include_amendments,
+            },
+            "pagination": {
+                "since": request.since,
+                "cursor": request.cursor,
+                "next_cursor": next_cursor,
+                "has_more": has_more,
+                "candidate_count_remaining_at_page_start": len(candidates),
+                "scanned_count": scanned_count,
+                "scan_limit": MAX_FORM_D_SCAN_PER_REQUEST,
+            },
+            "provenance": {
+                "publisher": "U.S. Securities and Exchange Commission",
+                "official_index_urls": index_urls,
+                "available_through": max(index_dates),
+                "source_snapshot_at": source_snapshot_at,
+                "source_payload_sha256": f"sha256:{source_payload_hash}",
+                "component_source_hashes": sorted(
+                    {
+                        f"sha256:{snapshot.content_sha256}"
+                        for snapshot in source_snapshots
+                    }
+                ),
+                "parser_version": FORM_D_PARSER_VERSION,
+                "parse_failure_accessions": parse_failure_accessions,
+                "result_sha256": None,
+            },
+            "limitations": [
+                "Form D is a notice of an exempt offering, not proof that the total offering amount was raised.",
+                "Amount sold and related-person data are issuer-reported to the SEC and may be amended.",
+                "Daily-index filing dates have day precision; use accession deduplication when polling overlapping windows.",
+                "This is a factual GTM signal, not investment, legal, or solicitation advice.",
+            ],
+        }
+        return self._store_prepared(
+            "form_d_funding_leads",
+            request_hash,
+            source_bundle_hash,
+            result_core,
+        )
 
     def prepare_sec(self, request: SecDeltaRequest) -> PreparedResult:
         request_payload = request.model_dump(mode="json")
@@ -1794,6 +2279,14 @@ class EvidenceService:
             return status
 
         route_metadata = {
+            "/v1/gtm/form-d-funding-leads": {
+                "tier": "gtm-signal",
+                "price_usd": "0.05",
+                "hypothesis": (
+                    "Agents will repeatedly pay for official Form D signals that "
+                    "identify newly finance-active private companies and people."
+                ),
+            },
             "/v1/ofac/payment-preflight": {
                 "tier": "decision",
                 "price_usd": "0.01",
@@ -1938,8 +2431,8 @@ class EvidenceService:
                     paid_fulfillment_rate is not None
                     and paid_fulfillment_rate >= Decimal("0.99")
                 ),
-                "no_buyer_above_70_percent_of_calls": bool(
-                    top_buyer_share is not None and top_buyer_share <= 0.70
+                "no_buyer_above_50_percent_of_calls": bool(
+                    top_buyer_share is not None and top_buyer_share <= 0.50
                 ),
             },
             "routes": list(funnels.values()),

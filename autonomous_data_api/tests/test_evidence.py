@@ -1,10 +1,12 @@
 import base64
 import json
+from datetime import datetime, timedelta, timezone
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from autonomous_data_api.evidence import (
     EvidenceService,
+    FormDFundingLeadsRequest,
     OfacExactRequest,
     OfacPreflightRequest,
     SecDeltaRequest,
@@ -342,6 +344,103 @@ def test_sec_premium_accepts_ticker_and_timestamp(tmp_path, monkeypatch):
     assert "receipt" in prepared.result
 
 
+def test_form_d_funding_leads_filters_paginates_and_preserves_source_basis(
+    tmp_path, monkeypatch
+):
+    evidence = service(tmp_path, monkeypatch)
+    now = datetime.now(timezone.utc)
+    filed = (now - timedelta(days=1)).date()
+    since = (now - timedelta(days=3)).replace(microsecond=0)
+    cik = "0001050743"
+    accessions = ["0001050743-26-000002", "0001050743-26-000001"]
+    index_content = (
+        "CIK|Company Name|Form Type|Date Filed|File Name\n"
+        + "\n".join(
+            f"{cik}|Example Issuer {index}|D|{filed:%Y%m%d}|"
+            f"edgar/data/{int(cik)}/{accession}.txt"
+            for index, accession in enumerate(accessions, start=1)
+        )
+    ).encode()
+    empty_index = b"CIK|Company Name|Form Type|Date Filed|File Name\n"
+
+    def filing_content(accession, amount_sold, company_name):
+        return f"""<SEC-DOCUMENT>{accession}.txt : {filed:%Y%m%d}
+<SEC-HEADER><ACCEPTANCE-DATETIME>{filed:%Y%m%d}120000</SEC-HEADER>
+<DOCUMENT><TYPE>D<FILENAME>primary_doc.xml<TEXT><XML>
+<edgarSubmission>
+  <submissionType>D</submissionType><testOrLive>LIVE</testOrLive>
+  <primaryIssuer><cik>{cik}</cik><entityName>{company_name}</entityName>
+    <issuerAddress><city>Bedminster</city><stateOrCountry>NJ</stateOrCountry><zipCode>07921</zipCode></issuerAddress>
+    <jurisdictionOfInc>NEW JERSEY</jurisdictionOfInc><entityType>Corporation</entityType>
+  </primaryIssuer>
+  <relatedPersonsList><relatedPersonInfo><relatedPersonName><firstName>Alex</firstName><lastName>Example</lastName></relatedPersonName><relatedPersonRelationshipList><relationship>Executive Officer</relationship></relatedPersonRelationshipList></relatedPersonInfo></relatedPersonsList>
+  <offeringData><industryGroup><industryGroupType>Commercial Banking</industryGroupType></industryGroup>
+    <typeOfFiling><newOrAmendment><isAmendment>false</isAmendment></newOrAmendment><dateOfFirstSale><value>{filed.isoformat()}</value></dateOfFirstSale></typeOfFiling>
+    <typesOfSecuritiesOffered><isEquityType>true</isEquityType></typesOfSecuritiesOffered>
+    <minimumInvestmentAccepted>1000</minimumInvestmentAccepted>
+    <offeringSalesAmounts><totalOfferingAmount>10000000</totalOfferingAmount><totalAmountSold>{amount_sold}</totalAmountSold><totalRemaining>5000000</totalRemaining></offeringSalesAmounts>
+    <investors><totalNumberAlreadyInvested>3</totalNumberAlreadyInvested></investors>
+  </offeringData>
+</edgarSubmission>
+</XML></TEXT></DOCUMENT></SEC-DOCUMENT>""".encode()
+
+    documents = {
+        accessions[0]: filing_content(accessions[0], "5000000", "Example One"),
+        accessions[1]: filing_content(accessions[1], "2000000", "Example Two"),
+    }
+
+    def fake_fetch(source_id, url, max_age_seconds):
+        del max_age_seconds
+        if url.endswith(".idx"):
+            content = index_content if f"{filed:%Y%m%d}" in url else empty_index
+        else:
+            content = next(
+                document
+                for accession, document in documents.items()
+                if accession in url
+            )
+        return make_snapshot(source_id, content)
+
+    monkeypatch.setattr(evidence, "_fetch_sec_source", fake_fetch)
+    first_request = FormDFundingLeadsRequest(
+        since=since.isoformat(),
+        states=["nj"],
+        industry_keywords=["bank"],
+        minimum_amount_sold_usd="1000000",
+        limit=1,
+    )
+    first = evidence.prepare_form_d_funding_leads(first_request)
+
+    assert first.product == "form_d_funding_leads"
+    assert first.result["decision"] == "FORM_D_FUNDING_SIGNALS_FOUND"
+    assert first.result["lead_count"] == 1
+    assert first.result["leads"][0]["issuer"]["name"] == "Example One"
+    assert first.result["leads"][0]["funding_signal"]["amount_sold_usd"] == ("5000000")
+    assert first.result["leads"][0]["funding_signal"]["date_of_first_sale"] == (
+        filed.isoformat()
+    )
+    assert first.result["leads"][0]["related_people"] == [
+        {"name": "Alex Example", "roles": ["Executive Officer"]}
+    ]
+    assert first.result["pagination"]["has_more"] is True
+    assert first.result["pagination"]["next_cursor"] == accessions[0]
+    assert "receipt" in first.result
+    assert "not proof" in " ".join(first.result["limitations"]).lower()
+
+    second = evidence.prepare_form_d_funding_leads(
+        FormDFundingLeadsRequest(
+            **{
+                **first_request.model_dump(),
+                "cursor": first.result["pagination"]["next_cursor"],
+            }
+        )
+    )
+    assert second.result["lead_count"] == 1
+    assert second.result["leads"][0]["issuer"]["name"] == "Example Two"
+    assert second.result["pagination"]["has_more"] is False
+    assert second.result["pagination"]["next_cursor"] is None
+
+
 def test_conversion_experiment_excludes_probes_and_owner_payments(
     tmp_path, monkeypatch
 ):
@@ -434,6 +533,14 @@ def test_conversion_experiment_excludes_probes_and_owner_payments(
     assert experiment["independent_revenue_usd"] == "0.03"
     assert experiment["independent_paid_fulfillment_rate_percent"] == 75.0
     assert experiment["max_independent_buyer_call_share"] == 0.6667
+    assert experiment["gates"]["no_buyer_above_50_percent_of_calls"] is False
+    form_d = next(
+        route
+        for route in experiment["routes"]
+        if route["route"] == "/v1/gtm/form-d-funding-leads"
+    )
+    assert form_d["price_usd"] == "0.05"
+    assert form_d["independent_fulfilled_calls"] == 0
     preflight = next(
         route
         for route in experiment["routes"]

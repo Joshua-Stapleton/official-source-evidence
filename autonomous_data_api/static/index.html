@@ -3,15 +3,15 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Official Source Evidence - SEC and OFAC APIs for Agents</title>
-    <meta name="description" content="Decision-ready SEC filing and OFAC address checks from $0.01, plus source-hashed evidence and signed receipts. No API key required.">
+    <title>Official Source Evidence - SEC GTM Signals and OFAC APIs</title>
+    <meta name="description" content="New SEC Form D sales triggers, SEC filing checks, and OFAC address evidence for autonomous agents, payable per call with no API key.">
     <meta name="robots" content="index,follow">
     <link rel="canonical" href="https://evidence.regulavita.com/">
     <link rel="icon" href="/favicon.ico">
     <link rel="alternate" type="application/json" href="/.well-known/agent-service.json" title="Agent service manifest">
     <meta property="og:type" content="website">
     <meta property="og:title" content="Official Source Evidence">
-    <meta property="og:description" content="Decision-ready SEC and OFAC checks from $0.01, payable per call by autonomous agents over x402.">
+    <meta property="og:description" content="Official SEC Form D sales triggers and SEC and OFAC evidence, payable per call by autonomous agents over x402.">
     <meta property="og:url" content="https://evidence.regulavita.com/">
     <meta property="og:image" content="https://evidence.regulavita.com/icon.png">
     <meta name="twitter:card" content="summary">
@@ -21,11 +21,12 @@
         "@type": "SoftwareApplication",
         "name": "Official Source Evidence",
         "applicationCategory": "DeveloperApplication",
-        "description": "Decision-ready SEC filing and OFAC address checks from $0.01, plus source-hashed evidence and signed receipts.",
+        "description": "Official SEC Form D sales triggers, SEC filing checks, and OFAC address evidence for autonomous agents.",
         "url": "https://evidence.regulavita.com/",
         "image": "https://evidence.regulavita.com/icon.png",
         "provider": {"@type": "Organization", "name": "Regulavita"},
         "offers": [
+          {"@type": "Offer", "name": "SEC Form D funding signals", "price": "0.05", "priceCurrency": "USD"},
           {"@type": "Offer", "name": "OFAC payment preflight", "price": "0.01", "priceCurrency": "USD"},
           {"@type": "Offer", "name": "SEC filing change signal", "price": "0.01", "priceCurrency": "USD"},
           {"@type": "Offer", "name": "OFAC exact identifier evidence", "price": "0.05", "priceCurrency": "USD"},
@@ -379,7 +380,7 @@
         <div class="shell">
           <div class="eyebrow"><span class="live-dot"></span>Live on Base mainnet</div>
           <h1>Official Source Evidence</h1>
-          <p class="lead">Check a payment address or SEC filing state for $0.01, then buy signed source evidence only when the decision needs proof. Built for autonomous agents with no account, API key, or subscription.</p>
+          <p class="lead">Find newly finance-active private companies from SEC Form D notices, or check a payment address and public-company filing state. Every result is payable per call by autonomous agents with no account, API key, or subscription.</p>
           <div class="actions">
             <a class="action" href="/docs">Open API docs</a>
             <a class="action secondary" href="/.well-known/agent-service.json">Read machine manifest</a>
@@ -398,9 +399,18 @@
         <div class="shell">
           <div class="section-heading">
             <h2>Paid endpoints</h2>
-            <p class="section-note">Start with a compact decision. Upgrade to a signed, replayable evidence bundle only when your workflow needs proof.</p>
+            <p class="section-note">Poll official sources for an actionable signal, then continue from the returned cursor. Signed provenance keeps every paid result inspectable and replayable.</p>
           </div>
           <div class="endpoint-list">
+            <article class="endpoint">
+              <span class="method">POST</span>
+              <div>
+                <span class="endpoint-path">/v1/gtm/form-d-funding-leads</span>
+                <p class="endpoint-copy">Find new SEC Form D private-offering notices by issuer state, industry keyword, and reported amount sold. Returns company context, related people, official filing links, and a cursor for the next page.</p>
+                <div class="endpoint-links"><a href="/v1/gtm/form-d-funding-leads/sample">Free sample</a><a href="/docs#/default/form_d_funding_leads_v1_gtm_form_d_funding_leads_post">Open schema</a></div>
+              </div>
+              <div class="price">$0.05<small>per page</small></div>
+            </article>
             <article class="endpoint">
               <span class="method">POST</span>
               <div>
@@ -443,7 +453,7 @@
 
       <div class="proof-band">
         <div class="shell proof-grid">
-          <div class="proof-item"><strong>Official inputs</strong><p>Versioned U.S. Treasury OFAC files and SEC EDGAR submissions and company facts.</p></div>
+          <div class="proof-item"><strong>Official inputs</strong><p>Versioned U.S. Treasury OFAC files and SEC EDGAR daily indexes, submissions, and company facts.</p></div>
           <div class="proof-item"><strong>Deterministic output</strong><p>Canonical request, source-bundle, component, and result hashes.</p></div>
           <div class="proof-item"><strong>Replayable receipt</strong><p>Ed25519-signed evidence and paid-result replay bound to the original payment proof.</p></div>
         </div>
@@ -453,7 +463,7 @@
     <footer>
       <div class="shell footer-row">
         <span>Regulavita - Official Source Evidence</span>
-        <span>Exact evidence only. No advice, authorization, or sanctions clearance.</span>
+        <span>Factual signals and exact evidence only. No advice, authorization, or sanctions clearance.</span>
       </div>
     </footer>
   </body>

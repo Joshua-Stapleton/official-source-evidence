@@ -4,6 +4,7 @@ This is the implementation of the 1 August 2026 autonomous-business sprint verdi
 
 Paid candidates:
 
+- `POST /v1/gtm/form-d-funding-leads` at `$0.05` USDC per fulfilled call.
 - `POST /v1/ofac/payment-preflight` at `$0.01` USDC per fulfilled call.
 - `POST /v1/sec/filing-change-signal` at `$0.01` USDC per fulfilled call.
 - `POST /v1/sec/filing-trigger-delta` at `$0.10` USDC per fulfilled call.
@@ -12,6 +13,14 @@ Paid candidates:
 The PFAS and grid lead endpoints remain available for prior API-key experiments, but their x402 routes return `410 RETIRED_WEDGE` and are not promoted in the agent manifest.
 
 ## Product Boundaries
+
+The Form D GTM endpoint scans official SEC daily indexes in bounded pages. It
+filters new filings by issuer state, industry keyword, and issuer-reported amount
+sold, then returns company context, related people, official links, hashes, a
+cursor, and a signed receipt. Form D is an issuer-filed notice of an exempt
+offering, not proof that the total offering amount was raised. The route does not
+infer funding, recommend securities, enrich personal contact details, or perform
+outreach.
 
 The SEC signal accepts a ticker and timestamp and returns a compact filing-change decision. The premium SEC endpoint also accepts CIK and accession inputs, and adds document hashes, selected XBRL fact deltas, source freshness, provenance, and a signed receipt. Neither returns ratings, materiality opinions, valuation, trading advice, or execution instructions.
 
@@ -50,6 +59,7 @@ Useful local URLs:
 - `http://127.0.0.1:8765/docs`
 - `http://127.0.0.1:8765/.well-known/agent-service.json`
 - `http://127.0.0.1:8765/v1/experiments/status`
+- `http://127.0.0.1:8765/v1/gtm/form-d-funding-leads/sample`
 - `http://127.0.0.1:8765/v1/sec/sample`
 - `http://127.0.0.1:8765/v1/ofac/sample`
 
@@ -63,7 +73,9 @@ curl -i -X POST http://127.0.0.1:8765/v1/ofac/exact-identifier-evidence \
 
 ## Official Sources
 
-SEC submissions and company facts are public and require no API key. SEC automated-access guidance does require an identifying User-Agent with contact details:
+SEC daily indexes, filing submissions, company submissions, and company facts
+are public and require no API key. SEC automated-access guidance does require an
+identifying User-Agent with contact details:
 
 ```bash
 export AUTONOMOUS_SEC_USER_AGENT='OfficialSourceEvidence/0.2 YourOrg contact@example.com'
@@ -99,6 +111,7 @@ export AUTONOMOUS_X402_SEC_PRICE='$0.10'
 export AUTONOMOUS_X402_SEC_SIGNAL_PRICE='$0.01'
 export AUTONOMOUS_X402_OFAC_PRICE='$0.05'
 export AUTONOMOUS_X402_OFAC_PREFLIGHT_PRICE='$0.01'
+export AUTONOMOUS_X402_FORM_D_PRICE='$0.05'
 ```
 
 Testnet proves technical readiness only. It does not count as demand, revenue, a payer, repeat use, or retention.
@@ -158,6 +171,7 @@ Production credentials are stored only as Fly secrets.
 - Strict Pydantic and Bazaar JSON schemas; unknown fields are rejected.
 - Fixed SEC and OFAC source allowlists; no arbitrary URL fetching.
 - Bounded forms, rules, filings, source-history files, payloads, and lists.
+- Form D lookbacks are capped at 14 days and each page scans at most 25 filings.
 - Source freshness checked before HTTP 402.
 - Immutable compressed source snapshots and parser versions.
 - Canonical request, source-bundle, result, and component hashes.
@@ -171,7 +185,11 @@ Host-level WAF, per-IP/per-wallet/per-ASN rate limits, alerting, backups, and da
 
 ## Demand Gates
 
-Continue after 30 days only if all sprint gates pass, including 5 non-owner payer clusters, 50 non-self fulfilled calls, 2 repeat clusters across separate UTC days, greater than 80% measured gross margin, at least 99% paid fulfilment, under 30 minutes of normal weekly support, no payer above 70% of calls, and no unresolved legal/source/provenance issue.
+Continue after 30 days only if all sprint gates pass, including 5 non-owner
+payer clusters, 50 non-self fulfilled calls, 2 repeat clusters across separate
+UTC days, greater than 80% measured gross margin, at least 99% paid fulfilment,
+under 30 minutes of normal weekly support, no payer above 50% of calls, and no
+unresolved legal/source/provenance issue.
 
 Kill at Day 21 if the correctly indexed service has zero non-owner paid wallets. Do not extend automatically at Day 31.
 
