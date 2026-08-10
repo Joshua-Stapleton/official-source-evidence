@@ -1,27 +1,37 @@
-# Official Source Evidence and GTM Signals
+# Agent Evidence, Source Watch, and GTM Signals
 
-Pay-per-call official-source GTM signals and evidence for autonomous agents. No
-account, API key, subscription, or sales call.
+Long-running monitoring jobs and pay-per-call official-source GTM signals and
+evidence for autonomous agents. No account, API key, or sales call.
 
 **Live service:** [evidence.regulavita.com](https://evidence.regulavita.com/)
 | [OpenAPI](https://evidence.regulavita.com/openapi.json)
 | [Agent manifest](https://evidence.regulavita.com/.well-known/agent-service.json)
 | [Coinbase Bazaar listing](https://api.cdp.coinbase.com/platform/v2/x402/discovery/merchant?payTo=0x9500075649a70411c81f99c4314f6cff55d12579&limit=100)
 
-## Agent-Payable Endpoints
+The Source Watch demand hypothesis, attribution rules, and stop/scale gates are
+pre-registered in [SOURCE_WATCH_EXPERIMENT.md](autonomous_data_api/SOURCE_WATCH_EXPERIMENT.md).
+
+## Agent-Payable Products
 
 | Endpoint | Result | Price |
 | --- | --- | ---: |
+| `POST /v1/monitors/source-change` | Monitor one public HTTPS text, HTML, JSON, or XML source every six hours for 30 days, with private polling and optional signed webhooks | $1.00 USDC |
 | `POST /v1/gtm/form-d-funding-leads` | New SEC Form D private-offering signals filtered by issuer state, industry keyword, and reported amount sold, with related people, official links, and a cursor | $0.05 USDC |
 | `POST /v1/ofac/payment-preflight` | Compact stop/no-exact-match decision for an EVM destination address against current official OFAC data | $0.01 USDC |
 | `POST /v1/sec/filing-change-signal` | New SEC 8-K, 10-Q, or 10-K filings for a ticker since a timestamp, with links and a next-check cursor | $0.01 USDC |
 | `POST /v1/ofac/exact-identifier-evidence` | Exact OFAC SDN or Consolidated lookup for a crypto address, OFAC UID, or exact name, with versioned source proof | $0.05 USDC |
 | `POST /v1/sec/filing-trigger-delta` | New SEC filings for a ticker and timestamp or CIK and accession, plus deterministic XBRL deltas and a signed receipt | $0.10 USDC |
 
-All five routes use x402 v2 on Base mainnet. An x402-compatible client receives a
+All routes use x402 v2 on Base mainnet. An x402-compatible client receives a
 standard HTTP 402 challenge, pays USDC, retries automatically, and receives the
 JSON result. The production service has a hard `$10.00` accepted-revenue cap
 per UTC day.
+
+Source Watch is a long-running job rather than a lookup. It accepts only public
+HTTPS sources, does not follow redirects, caps each response at 1 MB, stores
+normalized text rather than raw pages, and expires automatically after 30 days.
+The paid response returns a bearer token for private status polling and, when
+requested, a separate HMAC secret for verifying change webhooks.
 
 Monitoring tools may send an empty unauthenticated `POST` to any paid route.
 The service treats that as the published example request and returns the normal
@@ -43,6 +53,7 @@ Inspect the free contracts before paying:
 curl https://evidence.regulavita.com/v1/ofac/sample
 curl https://evidence.regulavita.com/v1/sec/sample
 curl https://evidence.regulavita.com/v1/gtm/form-d-funding-leads/sample
+curl https://evidence.regulavita.com/v1/monitors/source-change/sample
 curl https://evidence.regulavita.com/llms.txt
 ```
 

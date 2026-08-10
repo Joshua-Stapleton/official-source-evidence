@@ -52,7 +52,9 @@ from autonomous_data_api.evidence import (
     PreparedResult,
     SecDeltaRequest,
     SecSignalRequest,
+    WebMonitorCreateRequest,
 )
+from autonomous_data_api.monitors import MonitorError, WebMonitorService
 
 X402_TEST_RECIPIENT = "0x000000000000000000000000000000000000dEaD"
 X402_NETWORK: Network = os.getenv("AUTONOMOUS_X402_NETWORK", "eip155:84532")
@@ -63,6 +65,7 @@ X402_OFAC_PRICE = os.getenv("AUTONOMOUS_X402_OFAC_PRICE", "$0.05")
 X402_SEC_SIGNAL_PRICE = os.getenv("AUTONOMOUS_X402_SEC_SIGNAL_PRICE", "$0.01")
 X402_OFAC_PREFLIGHT_PRICE = os.getenv("AUTONOMOUS_X402_OFAC_PREFLIGHT_PRICE", "$0.01")
 X402_FORM_D_PRICE = os.getenv("AUTONOMOUS_X402_FORM_D_PRICE", "$0.05")
+X402_SOURCE_WATCH_PRICE = os.getenv("AUTONOMOUS_X402_SOURCE_WATCH_PRICE", "$1.00")
 CONVERSION_EXPERIMENT_START_UTC = os.getenv(
     "AUTONOMOUS_CONVERSION_EXPERIMENT_START_UTC", ""
 ).strip()
@@ -131,6 +134,10 @@ FORM_D_PROBE_PAYLOAD = {
     "limit": 10,
     "max_source_age_seconds": 600,
 }
+SOURCE_WATCH_PROBE_PAYLOAD = {
+    "url": "https://www.sec.gov/newsroom/press-releases",
+    "label": "SEC press releases",
+}
 
 
 def load_cdp_api_key_secret() -> str:
@@ -170,6 +177,7 @@ def utc_now() -> str:
 
 
 evidence_service = EvidenceService()
+monitor_service = WebMonitorService(evidence_service.db_path)
 
 
 async def refresh_ofac_sources() -> None:
@@ -183,29 +191,43 @@ async def refresh_ofac_sources() -> None:
         await asyncio.sleep(300)
 
 
+async def run_source_watch_checks() -> None:
+    while True:
+        try:
+            await run_in_threadpool(monitor_service.run_due)
+        except (OSError, sqlite3.Error):
+            pass
+        await asyncio.sleep(60)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     refresh_task: asyncio.Task[None] | None = None
+    monitor_task: asyncio.Task[None] | None = None
     if os.getenv("AUTONOMOUS_EVIDENCE_BACKGROUND_REFRESH", "0") == "1":
         refresh_task = asyncio.create_task(refresh_ofac_sources())
+    if os.getenv("AUTONOMOUS_SOURCE_WATCH_ENABLED", "1") == "1":
+        monitor_task = asyncio.create_task(run_source_watch_checks())
     try:
         yield
     finally:
-        if refresh_task:
-            refresh_task.cancel()
+        tasks = [task for task in (refresh_task, monitor_task) if task]
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
             try:
-                await refresh_task
+                await task
             except asyncio.CancelledError:
                 pass
 
 
 app = FastAPI(
-    title="Official Source Evidence API",
-    version="0.5.0",
+    title="Agent Evidence and Source Watch API",
+    version="0.6.0",
     description=(
-        "Pay-per-call SEC Form D GTM signals, source-hashed EDGAR filing deltas, "
-        "and exact OFAC identifier evidence for autonomous agents. No API keys "
-        "or subscriptions. "
+        "Long-running source-change monitoring plus pay-per-call SEC Form D GTM "
+        "signals, source-hashed EDGAR filing deltas, and exact OFAC identifier "
+        "evidence for autonomous agents. No accounts or API keys. "
         "No investment advice, sanctions clearance, compliance determination, or legal advice."
     ),
     contact={"name": "Regulavita", "email": "joshua@regulavita.com"},
@@ -272,6 +294,89 @@ x402_server = x402ResourceServer(x402_facilitator)
 x402_server.register(X402_NETWORK, ExactEvmServerScheme())
 
 x402_routes: dict[str, RouteConfig] = {
+    "POST /v1/monitors/source-change": RouteConfig(
+        accepts=[
+            PaymentOption(
+                scheme="exact",
+                pay_to=X402_PAY_TO,
+                price=X402_SOURCE_WATCH_PRICE,
+                network=X402_NETWORK,
+            )
+        ],
+        mime_type="application/json",
+        description=(
+            "Monitor one public HTTPS text, HTML, JSON, or XML source every six "
+            "hours for 30 days. Stores normalized diffs, exposes private polling, "
+            "and optionally sends HMAC-signed change webhooks. No account or API key."
+        ),
+        service_name="Source Change Watch",
+        tags=[
+            "monitoring",
+            "change-detection",
+            "webhook",
+            "long-running-job",
+            "website-monitor",
+            "source-diff",
+        ],
+        icon_url=SERVICE_ICON_URL,
+        extensions=get_discovery_extension(
+            method="POST",
+            input=SOURCE_WATCH_PROBE_PAYLOAD,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "format": "uri",
+                        "pattern": "^https://",
+                        "maxLength": 2048,
+                        "description": "Public HTTPS source to monitor.",
+                    },
+                    "label": {"type": "string", "maxLength": 120},
+                    "webhook_url": {
+                        "type": "string",
+                        "format": "uri",
+                        "pattern": "^https://",
+                        "maxLength": 2048,
+                        "description": "Optional public HTTPS webhook for signed change events.",
+                    },
+                },
+                "required": ["url"],
+                "additionalProperties": False,
+            },
+            output=OutputConfig(
+                example={
+                    "monitor_id": "mon_example",
+                    "status": "ACTIVE",
+                    "expires_at": "2026-09-09T00:00:00+00:00",
+                    "check_interval_seconds": 21600,
+                    "access_token": "returned_once_after_payment",
+                    "status_url": f"{PUBLIC_BASE_URL.rstrip('/')}/v1/monitors/mon_example",
+                    "webhook": {"configured": False},
+                },
+                schema={
+                    "type": "object",
+                    "required": [
+                        "monitor_id",
+                        "status",
+                        "expires_at",
+                        "check_interval_seconds",
+                        "access_token",
+                        "status_url",
+                    ],
+                    "properties": {
+                        "monitor_id": {"type": "string"},
+                        "status": {"type": "string"},
+                        "expires_at": {"type": "string", "format": "date-time"},
+                        "check_interval_seconds": {"type": "integer"},
+                        "access_token": {"type": "string"},
+                        "status_url": {"type": "string", "format": "uri"},
+                        "webhook": {"type": "object"},
+                    },
+                },
+            ),
+        ),
+    ),
     "POST /v1/gtm/form-d-funding-leads": RouteConfig(
         accepts=[
             PaymentOption(
@@ -789,6 +894,12 @@ def find_wallet(value: Any) -> str | None:
 
 class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
     ROUTES: ClassVar[dict[str, tuple[type[BaseModel], str, str, dict[str, Any]]]] = {
+        "/v1/monitors/source-change": (
+            WebMonitorCreateRequest,
+            "prepare_web_monitor",
+            X402_SOURCE_WATCH_PRICE,
+            SOURCE_WATCH_PROBE_PAYLOAD,
+        ),
         "/v1/gtm/form-d-funding-leads": (
             FormDFundingLeadsRequest,
             "prepare_form_d_funding_leads",
@@ -937,6 +1048,7 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
                     }
                 },
             )
+        request.state.evidence_validated = validated
         try:
             prepare_method = getattr(self.service, prepare_method_name)
             prepared: PreparedResult = await run_in_threadpool(
@@ -1067,6 +1179,7 @@ app.add_middleware(
     network=X402_NETWORK,
     daily_cap=X402_DAILY_REVENUE_CAP_USD,
     route_prices={
+        ("POST", "/v1/monitors/source-change"): price_decimal(X402_SOURCE_WATCH_PRICE),
         ("POST", "/v1/gtm/form-d-funding-leads"): price_decimal(X402_FORM_D_PRICE),
         ("POST", "/v1/ofac/payment-preflight"): price_decimal(
             X402_OFAC_PREFLIGHT_PRICE
@@ -1116,6 +1229,7 @@ def health() -> dict[str, Any]:
         "x402": {
             "network": X402_NETWORK,
             "prices": {
+                "source_change_watch_30_day": X402_SOURCE_WATCH_PRICE,
                 "form_d_funding_leads": X402_FORM_D_PRICE,
                 "ofac_preflight": X402_OFAC_PREFLIGHT_PRICE,
                 "sec_signal": X402_SEC_SIGNAL_PRICE,
@@ -1136,6 +1250,7 @@ def health() -> dict[str, Any]:
                 else "testnet-demo-recipient"
             ),
         },
+        "source_watch": monitor_service.public_stats(),
     }
 
 
@@ -1148,7 +1263,7 @@ def service_home() -> FileResponse:
 def service_index() -> dict[str, str]:
     base_url = PUBLIC_BASE_URL.rstrip("/")
     return {
-        "name": "Official Source Evidence API",
+        "name": "Agent Evidence and Source Watch API",
         "health": f"{base_url}/health",
         "docs": f"{base_url}/docs",
         "manifest": f"{base_url}/.well-known/agent-service.json",
@@ -1186,6 +1301,7 @@ def sitemap() -> Response:
         "/",
         "/docs",
         "/openapi.json",
+        "/v1/monitors/source-change/sample",
         "/v1/gtm/form-d-funding-leads/sample",
         "/v1/sec/sample",
         "/v1/ofac/sample",
@@ -1202,11 +1318,12 @@ def sitemap() -> Response:
 def llms_txt() -> PlainTextResponse:
     base_url = PUBLIC_BASE_URL.rstrip("/")
     return PlainTextResponse(
-        f"""# Official Source Evidence API
+        f"""# Agent Evidence and Source Watch API
 
-Pay-per-call official-source evidence for autonomous agents. No account, API key, or subscription.
+Long-running monitoring jobs and pay-per-call official-source evidence for autonomous agents. No account or API key.
 
 ## Paid endpoints
+- POST {base_url}/v1/monitors/source-change - $1.00 USDC. Monitor one public HTTPS text, HTML, JSON, or XML source every six hours for 30 days. Private polling and optional HMAC-signed change webhooks are included.
 - POST {base_url}/v1/gtm/form-d-funding-leads - $0.05 USDC. Find newly filed SEC Form D private-offering signals for GTM workflows. Filter by issuer state, industry keyword, and reported amount sold; returns official links, related people, and a cursor.
 - POST {base_url}/v1/ofac/payment-preflight - $0.01 USDC. Before sending funds, check whether an exact EVM destination address appears in current official OFAC SDN or Consolidated data. Compact decision output; no signed receipt.
 - POST {base_url}/v1/sec/filing-change-signal - $0.01 USDC. Check a ticker or CIK for a new 8-K, 10-Q, or 10-K after a timestamp. Compact filing signal and next-check cursor; no signed receipt.
@@ -1217,12 +1334,13 @@ Pay-per-call official-source evidence for autonomous agents. No account, API key
 - OpenAPI: {base_url}/openapi.json
 - Agent manifest: {base_url}/.well-known/agent-service.json
 - Interactive docs: {base_url}/docs
+- Source Watch sample: {base_url}/v1/monitors/source-change/sample
 - Form D sample: {base_url}/v1/gtm/form-d-funding-leads/sample
 - OFAC sample: {base_url}/v1/ofac/sample
 - SEC sample: {base_url}/v1/sec/sample
 
 ## Boundaries
-Exact source evidence and factual GTM signals only. Form D is a notice, not proof of total funding raised. No fuzzy sanctions screening, sanctions clearance, transaction authorization, materiality opinion, investment advice, or legal advice.
+Source Watch supports public HTTPS sources only and does not render JavaScript or access authenticated pages. Exact source evidence and factual GTM signals only. Form D is a notice, not proof of total funding raised. No fuzzy sanctions screening, sanctions clearance, transaction authorization, materiality opinion, investment advice, or legal advice.
 """
     )
 
@@ -1231,10 +1349,10 @@ Exact source evidence and factual GTM signals only. Form D is a notice, not proo
 def agent_manifest() -> dict[str, Any]:
     base_url = os.getenv("AUTONOMOUS_API_BASE_URL", "http://localhost:8765").rstrip("/")
     return {
-        "name": "Official Source Evidence API",
+        "name": "Agent Evidence and Source Watch API",
         "description": (
-            "Pay-per-call SEC Form D GTM signals, OFAC payment preflight, and SEC "
-            "filing-change decisions, plus signed official-source receipts."
+            "Long-running source-change monitors plus pay-per-call SEC Form D GTM "
+            "signals, OFAC payment preflight, SEC filing decisions, and signed receipts."
         ),
         "contact": "joshua@regulavita.com",
         "icon_url": SERVICE_ICON_URL,
@@ -1243,6 +1361,7 @@ def agent_manifest() -> dict[str, Any]:
             "protocol": "x402-v2",
             "network": X402_NETWORK,
             "prices": {
+                "/v1/monitors/source-change": X402_SOURCE_WATCH_PRICE,
                 "/v1/gtm/form-d-funding-leads": X402_FORM_D_PRICE,
                 "/v1/ofac/payment-preflight": X402_OFAC_PREFLIGHT_PRICE,
                 "/v1/sec/filing-change-signal": X402_SEC_SIGNAL_PRICE,
@@ -1259,11 +1378,13 @@ def agent_manifest() -> dict[str, Any]:
         "openapi_url": f"{base_url}/openapi.json",
         "llms_url": f"{base_url}/llms.txt",
         "sample_endpoints": [
+            f"{base_url}/v1/monitors/source-change/sample",
             f"{base_url}/v1/gtm/form-d-funding-leads/sample",
             f"{base_url}/v1/sec/sample",
             f"{base_url}/v1/ofac/sample",
         ],
         "agent_paid_endpoints": [
+            f"{base_url}/v1/monitors/source-change",
             f"{base_url}/v1/gtm/form-d-funding-leads",
             f"{base_url}/v1/ofac/payment-preflight",
             f"{base_url}/v1/sec/filing-change-signal",
@@ -1271,7 +1392,9 @@ def agent_manifest() -> dict[str, Any]:
             f"{base_url}/v1/ofac/exact-identifier-evidence",
         ],
         "status_endpoint": f"{base_url}/v1/experiments/status",
+        "source_watch_stats_endpoint": f"{base_url}/v1/monitors/stats",
         "boundaries": [
+            "Source Watch supports public HTTPS text-like sources only.",
             "Form D is an issuer-filed notice, not proof of the total funding raised.",
             "No investment advice or materiality opinion.",
             "No sanctions clearance, transaction authorization, or fuzzy screening.",
@@ -1407,6 +1530,102 @@ def ofac_sample() -> dict[str, Any]:
     }
 
 
+@app.get("/v1/monitors/source-change/sample")
+def source_change_watch_sample() -> dict[str, Any]:
+    return {
+        "sample_type": "static_contract_fixture",
+        "endpoint": {
+            "path": "/v1/monitors/source-change",
+            "price": X402_SOURCE_WATCH_PRICE,
+            "payment": "x402 v2 USDC on Base",
+        },
+        "request": SOURCE_WATCH_PROBE_PAYLOAD,
+        "service": {
+            "duration_days": 30,
+            "check_interval_seconds": 21600,
+            "supported_content": ["HTML", "JSON", "plain text", "XML"],
+            "maximum_response_bytes": 1000000,
+            "delivery": ["authenticated polling", "optional signed webhook"],
+        },
+        "response_shape": {
+            "monitor_id": "mon_example",
+            "status": "ACTIVE",
+            "access_token": "returned after successful payment",
+            "status_url": f"{PUBLIC_BASE_URL.rstrip('/')}/v1/monitors/mon_example",
+        },
+        "limitations": [
+            "Public HTTPS sources only.",
+            "No JavaScript rendering, login, cookies, or redirect following.",
+        ],
+    }
+
+
+def _monitor_access_token(authorization: str | None) -> str:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Bearer access token is required")
+    token = authorization.removeprefix("Bearer ").strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Bearer access token is required")
+    return token
+
+
+@app.post("/v1/monitors/source-change")
+def create_source_change_watch(
+    request: Request,
+    payload: WebMonitorCreateRequest | None = None,
+    payment_signature: str | None = Header(default=None, alias="Payment-Signature"),
+    x_payment: str | None = Header(default=None, alias="X-Payment"),
+) -> dict[str, Any]:
+    del payload
+    prepared: PreparedResult | None = getattr(request.state, "evidence_prepared", None)
+    validated: WebMonitorCreateRequest | None = getattr(
+        request.state, "evidence_validated", None
+    )
+    signature = payment_signature or x_payment
+    if prepared is None or validated is None or not signature:
+        raise HTTPException(
+            status_code=503, detail="Paid monitor activation unavailable"
+        )
+    try:
+        return monitor_service.activate(
+            request_id=prepared.request_id,
+            payment_signature=signature,
+            url=validated.url,
+            label=validated.label,
+            webhook_url=validated.webhook_url,
+            base_url=PUBLIC_BASE_URL,
+        )
+    except MonitorError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+
+@app.get("/v1/monitors/stats", include_in_schema=False)
+def source_change_watch_stats() -> dict[str, Any]:
+    return monitor_service.public_stats()
+
+
+@app.get("/v1/monitors/{monitor_id}")
+def get_source_change_watch(
+    monitor_id: str,
+    authorization: str | None = Header(default=None, alias="Authorization"),
+) -> dict[str, Any]:
+    try:
+        return monitor_service.status(monitor_id, _monitor_access_token(authorization))
+    except MonitorError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+
+@app.delete("/v1/monitors/{monitor_id}")
+def cancel_source_change_watch(
+    monitor_id: str,
+    authorization: str | None = Header(default=None, alias="Authorization"),
+) -> dict[str, Any]:
+    try:
+        return monitor_service.cancel(monitor_id, _monitor_access_token(authorization))
+    except MonitorError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+
 @app.post("/v1/gtm/form-d-funding-leads")
 def form_d_funding_leads(
     request: Request,
@@ -1491,8 +1710,9 @@ def evidence_experiment_status() -> dict[str, Any]:
 @app.get("/v1/summary")
 def summary() -> dict[str, Any]:
     return {
-        "service": "Official Source Evidence API",
+        "service": "Agent Evidence and Source Watch API",
         "products": [
+            "/v1/monitors/source-change",
             "/v1/gtm/form-d-funding-leads",
             "/v1/ofac/payment-preflight",
             "/v1/sec/filing-change-signal",
@@ -1502,6 +1722,7 @@ def summary() -> dict[str, Any]:
         "experiment": evidence_service.experiment_status(
             CONVERSION_EXPERIMENT_START_UTC or None
         ),
+        "source_watch": monitor_service.public_stats(),
     }
 
 
@@ -1569,8 +1790,13 @@ def custom_openapi() -> dict[str, Any]:
         "name": "Regulavita",
         "email": "joshua@regulavita.com",
     }
+    schema.setdefault("components", {}).setdefault("securitySchemes", {})[
+        "MonitorBearer"
+    ] = {"type": "http", "scheme": "bearer"}
     schema["info"]["x-guidance"] = (
-        "Use POST /v1/gtm/form-d-funding-leads for cursor-based private-company "
+        "Use POST /v1/monitors/source-change to buy a 30-day, six-hour-cadence "
+        "monitor for one public HTTPS source, with private polling and optional "
+        "signed webhooks. Use POST /v1/gtm/form-d-funding-leads for cursor-based private-company "
         "sales triggers derived from official SEC Form D notices. Use POST "
         "/v1/ofac/payment-preflight before sending funds to an EVM "
         "address. Use POST /v1/sec/filing-change-signal to check a ticker since "
@@ -1582,6 +1808,15 @@ def custom_openapi() -> dict[str, Any]:
     )
 
     paid_operations: dict[str, dict[str, Any]] = {
+        "/v1/monitors/source-change": {
+            "price": f"{price_decimal(X402_SOURCE_WATCH_PRICE):.6f}",
+            "example": SOURCE_WATCH_PROBE_PAYLOAD,
+            "description": (
+                "Create a 30-day source-change monitor for one public HTTPS text, "
+                "HTML, JSON, or XML source. Checks every six hours and includes "
+                "private polling plus optional HMAC-signed webhooks."
+            ),
+        },
         "/v1/gtm/form-d-funding-leads": {
             "price": f"{price_decimal(X402_FORM_D_PRICE):.6f}",
             "example": FORM_D_PROBE_PAYLOAD,
@@ -1669,6 +1904,8 @@ def custom_openapi() -> dict[str, Any]:
                     .setdefault("application/json", {})
                 )
                 content["example"] = paid["example"]
+            elif path == "/v1/monitors/{monitor_id}" and method in {"get", "delete"}:
+                operation["security"] = [{"MonitorBearer": []}]
             else:
                 operation["security"] = []
 

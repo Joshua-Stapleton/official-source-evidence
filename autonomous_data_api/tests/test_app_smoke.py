@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient
 
 from autonomous_data_api.app import (
     FORM_D_PROBE_PAYLOAD,
+    SOURCE_WATCH_PROBE_PAYLOAD,
     CdpFacilitatorAuthProvider,
     MainnetRevenueCapMiddleware,
     app,
@@ -68,6 +69,11 @@ def prepared(monkeypatch):
         evidence_service,
         "prepare_ofac_preflight",
         lambda _: make("ofac_preflight"),
+    )
+    monkeypatch.setattr(
+        evidence_service,
+        "prepare_web_monitor",
+        lambda _: make("source_change_watch"),
     )
 
 
@@ -117,7 +123,7 @@ def test_health_and_retired_wedges(client):
     index = client.get("/")
     assert index.status_code == 200
     assert index.headers["content-type"].startswith("text/html")
-    assert "Official Source Evidence" in index.text
+    assert "Source Change Watch" in index.text
     assert 'href="/.well-known/agent-service.json"' in index.text
 
     index_json = client.get("/index.json")
@@ -128,6 +134,7 @@ def test_health_and_retired_wedges(client):
     assert health.status_code == 200
     assert health.json()["x402"]["network"] == "eip155:84532"
     assert health.json()["x402"]["prices"] == {
+        "source_change_watch_30_day": "$1.00",
         "form_d_funding_leads": "$0.05",
         "ofac_preflight": "$0.01",
         "sec_signal": "$0.01",
@@ -153,6 +160,7 @@ def test_agent_manifest_promotes_only_verdict_endpoints(client):
     assert payload["openapi_url"].endswith("/openapi.json")
     assert payload["payment"]["protocol"] == "x402-v2"
     assert payload["agent_paid_endpoints"] == [
+        "http://localhost:8765/v1/monitors/source-change",
         "http://localhost:8765/v1/gtm/form-d-funding-leads",
         "http://localhost:8765/v1/ofac/payment-preflight",
         "http://localhost:8765/v1/sec/filing-change-signal",
@@ -170,6 +178,7 @@ def test_machine_discovery_and_crawler_surfaces(client):
     assert schema["servers"] == [{"url": "http://localhost:8765"}]
 
     expected = {
+        "/v1/monitors/source-change": "1.000000",
         "/v1/gtm/form-d-funding-leads": "0.050000",
         "/v1/ofac/payment-preflight": "0.010000",
         "/v1/sec/filing-change-signal": "0.010000",
@@ -208,6 +217,7 @@ def test_machine_discovery_and_crawler_surfaces(client):
     assert "/v1/sec/filing-change-signal - $0.01 USDC" in llms.text
     assert "/v1/ofac/exact-identifier-evidence - $0.05 USDC" in llms.text
     assert "/v1/sec/filing-trigger-delta - $0.10 USDC" in llms.text
+    assert "/v1/monitors/source-change - $1.00 USDC" in llms.text
 
     robots = client.get("/robots.txt")
     assert robots.status_code == 200
@@ -220,13 +230,21 @@ def test_machine_discovery_and_crawler_surfaces(client):
 
 
 @pytest.mark.parametrize(
-    ("path", "body", "expected_tag", "expected_amount"),
+    ("path", "body", "expected_tag", "expected_amount", "expected_service"),
     [
+        (
+            "/v1/monitors/source-change",
+            SOURCE_WATCH_PROBE_PAYLOAD,
+            "long-running-job",
+            "1000000",
+            "Source Change Watch",
+        ),
         (
             "/v1/gtm/form-d-funding-leads",
             FORM_D_PROBE_PAYLOAD,
             "funding-signal",
             "50000",
+            "Official Source Evidence",
         ),
         (
             "/v1/ofac/payment-preflight",
@@ -236,6 +254,7 @@ def test_machine_discovery_and_crawler_surfaces(client):
             },
             "payment-preflight",
             "10000",
+            "Official Source Evidence",
         ),
         (
             "/v1/sec/filing-change-signal",
@@ -246,6 +265,7 @@ def test_machine_discovery_and_crawler_surfaces(client):
             },
             "filing-change",
             "10000",
+            "Official Source Evidence",
         ),
         (
             "/v1/sec/filing-trigger-delta",
@@ -257,6 +277,7 @@ def test_machine_discovery_and_crawler_surfaces(client):
             },
             "filing-delta",
             "100000",
+            "Official Source Evidence",
         ),
         (
             "/v1/ofac/exact-identifier-evidence",
@@ -268,6 +289,7 @@ def test_machine_discovery_and_crawler_surfaces(client):
             },
             "exact-match",
             "50000",
+            "Official Source Evidence",
         ),
     ],
 )
@@ -278,6 +300,7 @@ def test_verdict_routes_advertise_payment_and_bazaar_post_schema(
     body,
     expected_tag,
     expected_amount,
+    expected_service,
 ):
     response = client.post(path, json=body)
     assert response.status_code == 402
@@ -287,7 +310,7 @@ def test_verdict_routes_advertise_payment_and_bazaar_post_schema(
     assert challenge["x402Version"] == 2
     assert challenge["accepts"][0]["network"] == "eip155:84532"
     assert challenge["accepts"][0]["amount"] == expected_amount
-    assert challenge["resource"]["serviceName"] == "Official Source Evidence"
+    assert challenge["resource"]["serviceName"] == expected_service
     assert expected_tag in challenge["resource"]["tags"]
     assert challenge["extensions"]["bazaar"]["info"]["input"]["method"] == "POST"
 
@@ -295,6 +318,7 @@ def test_verdict_routes_advertise_payment_and_bazaar_post_schema(
 @pytest.mark.parametrize(
     ("path", "expected_amount"),
     [
+        ("/v1/monitors/source-change", "1000000"),
         ("/v1/gtm/form-d-funding-leads", "50000"),
         ("/v1/ofac/payment-preflight", "10000"),
         ("/v1/sec/filing-change-signal", "10000"),

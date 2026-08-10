@@ -350,7 +350,11 @@ def test_form_d_funding_leads_filters_paginates_and_preserves_source_basis(
     evidence = service(tmp_path, monkeypatch)
     now = datetime.now(timezone.utc)
     filed = (now - timedelta(days=1)).date()
-    since = (now - timedelta(days=3)).replace(microsecond=0)
+    while filed.weekday() >= 5:
+        filed -= timedelta(days=1)
+    since = datetime.combine(
+        filed - timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc
+    )
     cik = "0001050743"
     accessions = ["0001050743-26-000002", "0001050743-26-000001"]
     index_content = (

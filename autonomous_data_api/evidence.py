@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import io
+import ipaddress
 import json
 import os
 import re
@@ -278,6 +279,56 @@ class FormDFundingLeadsRequest(BaseModel):
         )
         if any(not item or len(item) > 64 for item in cleaned):
             raise ValueError("industry keywords must contain 1-64 characters")
+        return cleaned
+
+
+class WebMonitorCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    url: str = Field(min_length=12, max_length=2048)
+    label: str | None = Field(default=None, max_length=120)
+    webhook_url: str | None = Field(default=None, min_length=12, max_length=2048)
+
+    @field_validator("url", "webhook_url")
+    @classmethod
+    def validate_public_https_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        parsed = urlparse(cleaned)
+        if parsed.scheme.casefold() != "https" or not parsed.hostname:
+            raise ValueError("URL must use HTTPS and include a public hostname")
+        if parsed.username or parsed.password or parsed.fragment:
+            raise ValueError("URL credentials and fragments are not supported")
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError("URL port is invalid") from exc
+        if port not in (None, 443):
+            raise ValueError("only the default HTTPS port is supported")
+        hostname = parsed.hostname.casefold()
+        if hostname == "localhost" or hostname.endswith(
+            (".localhost", ".local", ".internal")
+        ):
+            raise ValueError("URL must use a public internet hostname")
+        try:
+            literal = ipaddress.ip_address(hostname)
+        except ValueError:
+            literal = None
+        if literal is not None and not literal.is_global:
+            raise ValueError("URL must use a public internet address")
+        return cleaned
+
+    @field_validator("label")
+    @classmethod
+    def normalize_label(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = " ".join(value.split())
+        if not cleaned:
+            return None
+        if any(ord(character) < 32 for character in cleaned):
+            raise ValueError("label contains control characters")
         return cleaned
 
 
@@ -1653,6 +1704,41 @@ class EvidenceService:
             request_hash,
             source_bundle_hash,
             result_core,
+        )
+
+    def prepare_web_monitor(self, request: WebMonitorCreateRequest) -> PreparedResult:
+        request_payload = request.model_dump(mode="json")
+        request_hash = sha256_json(request_payload)
+        source_bundle_hash = sha256_bytes(b"source-change-watch/1.0")
+        result_core = {
+            "product": "SOURCE_CHANGE_WATCH_30_DAY",
+            "url": request.url,
+            "label": request.label,
+            "webhook_configured": bool(request.webhook_url),
+            "service_terms": {
+                "duration_days": 30,
+                "check_interval_seconds": 21600,
+                "maximum_response_bytes": 1000000,
+                "supported_scheme": "https",
+                "redirects_followed": False,
+            },
+            "provenance": {
+                "engine_version": "source-change-watch/1.0",
+                "request_sha256": f"sha256:{request_hash}",
+                "result_sha256": None,
+            },
+            "limitations": [
+                "Public HTTPS text, HTML, JSON, and XML sources only.",
+                "JavaScript-rendered content and authenticated pages are not supported.",
+                "A successful payment creates the monitor; the first baseline check runs asynchronously.",
+            ],
+        }
+        return self._store_prepared(
+            "source_change_watch",
+            request_hash,
+            source_bundle_hash,
+            result_core,
+            include_receipt=False,
         )
 
     def prepare_sec(self, request: SecDeltaRequest) -> PreparedResult:
