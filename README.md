@@ -49,6 +49,7 @@ Search the Coinbase Bazaar from an Agentic Wallet CLI:
 ```bash
 npx awal@latest x402 bazaar search "OFAC exact identifier evidence"
 npx awal@latest x402 bazaar search "SEC Form D funding sales trigger"
+npx awal@latest x402 bazaar search "public source snapshot normalized text signed receipt"
 ```
 
 Inspect the free contracts before paying:

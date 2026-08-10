@@ -63,16 +63,19 @@ from the results.
   run, with no paid resubmission and no social posting.
 - Added route-level conversion accounting that excludes owner calls, testnet
   calls, and unpaid probes.
-- Prepared an exact-price, exact-network, exact-recipient owner purchase for the
-  snapshot route. It remains unarmed until a $0.03 spend is explicitly approved.
+- Completed one explicitly approved, exact-price, exact-network, exact-recipient
+  owner purchase for the snapshot route. The $0.03 settlement succeeded in Base
+  transaction
+  `0x9d1c0945d71c4b2ebd518059bf5c9b5ce08c8f4e94ca1fafa14d370aa647ce6f`,
+  the ledger classified it as owner traffic, and Coinbase Bazaar indexed the
+  route with the correct schema, tags, price, asset, network, and payee.
 
 ## Next Test
 
-The next highest-value action is one $0.03 owner-funded snapshot settlement to
-trigger Coinbase Bazaar indexing, followed by observation rather than further
-product proliferation. A new endpoint should be added only if a second
-independent cohort, a repeat buyer, or a clearly observed agent workflow supports
-it.
+The next highest-value action is observation for independent snapshot use rather
+than further owner purchases or product proliferation. A new endpoint should be
+added only if a second independent cohort, a repeat buyer, or a clearly observed
+agent workflow supports it.
 
 The portfolio continues to use these global scale gates:
 
