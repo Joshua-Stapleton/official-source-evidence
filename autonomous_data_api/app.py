@@ -54,6 +54,7 @@ from autonomous_data_api.evidence import (
     SecSignalRequest,
     WebMonitorCreateRequest,
 )
+from autonomous_data_api.marketplace import MarketplaceError, The402Provider
 from autonomous_data_api.monitors import MonitorError, WebMonitorService
 
 X402_TEST_RECIPIENT = "0x000000000000000000000000000000000000dEaD"
@@ -178,6 +179,7 @@ def utc_now() -> str:
 
 evidence_service = EvidenceService()
 monitor_service = WebMonitorService(evidence_service.db_path)
+the402_provider = The402Provider(evidence_service.db_path, monitor_service)
 
 
 async def refresh_ofac_sources() -> None:
@@ -195,6 +197,10 @@ async def run_source_watch_checks() -> None:
     while True:
         try:
             await run_in_threadpool(monitor_service.run_due)
+        except (OSError, sqlite3.Error):
+            pass
+        try:
+            await run_in_threadpool(the402_provider.run_pending)
         except (OSError, sqlite3.Error):
             pass
         await asyncio.sleep(60)
@@ -1251,6 +1257,7 @@ def health() -> dict[str, Any]:
             ),
         },
         "source_watch": monitor_service.public_stats(),
+        "marketplace": {"the402": the402_provider.public_status()},
     }
 
 
@@ -1602,6 +1609,30 @@ def create_source_change_watch(
 @app.get("/v1/monitors/stats", include_in_schema=False)
 def source_change_watch_stats() -> dict[str, Any]:
     return monitor_service.public_stats()
+
+
+@app.post("/v1/integrations/the402/webhook", include_in_schema=False)
+async def the402_webhook(
+    request: Request,
+    platform_secret: str | None = Header(default=None, alias="X-Platform-Secret"),
+    webhook_signature: str | None = Header(default=None, alias="X-Webhook-Signature"),
+    webhook_timestamp: str | None = Header(default=None, alias="X-Webhook-Timestamp"),
+) -> dict[str, Any]:
+    raw_body = await request.body()
+    try:
+        return the402_provider.accept_webhook(
+            raw_body,
+            platform_secret=platform_secret,
+            signature=webhook_signature,
+            timestamp=webhook_timestamp,
+        )
+    except MarketplaceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+
+@app.get("/v1/integrations/the402/status", include_in_schema=False)
+def the402_integration_status() -> dict[str, Any]:
+    return the402_provider.public_status()
 
 
 @app.get("/v1/monitors/{monitor_id}")
