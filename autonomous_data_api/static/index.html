@@ -4,14 +4,14 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Source Change Watch and Official Evidence APIs for Agents</title>
-    <meta name="description" content="Thirty-day public source monitoring, SEC GTM signals, filing checks, and OFAC evidence for autonomous agents, payable with no account or API key.">
+    <meta name="description" content="One-shot public source extraction, thirty-day monitoring, SEC GTM signals, filing checks, and OFAC evidence for autonomous agents, payable with no account or API key.">
     <meta name="robots" content="index,follow">
     <link rel="canonical" href="https://evidence.regulavita.com/">
     <link rel="icon" href="/favicon.ico">
     <link rel="alternate" type="application/json" href="/.well-known/agent-service.json" title="Agent service manifest">
     <meta property="og:type" content="website">
     <meta property="og:title" content="Agent Evidence and Source Watch">
-    <meta property="og:description" content="Long-running source monitors and official SEC and OFAC evidence, payable by autonomous agents over x402.">
+    <meta property="og:description" content="One-shot source extraction, long-running monitors, and official SEC and OFAC evidence, payable by autonomous agents over x402.">
     <meta property="og:url" content="https://evidence.regulavita.com/">
     <meta property="og:image" content="https://evidence.regulavita.com/icon.png">
     <meta name="twitter:card" content="summary">
@@ -21,11 +21,12 @@
         "@type": "SoftwareApplication",
         "name": "Agent Evidence and Source Watch",
         "applicationCategory": "DeveloperApplication",
-        "description": "Long-running source monitoring, official SEC Form D signals, filing checks, and OFAC evidence for autonomous agents.",
+        "description": "One-shot public source extraction, long-running monitoring, official SEC Form D signals, filing checks, and OFAC evidence for autonomous agents.",
         "url": "https://evidence.regulavita.com/",
         "image": "https://evidence.regulavita.com/icon.png",
         "provider": {"@type": "Organization", "name": "Regulavita"},
         "offers": [
+          {"@type": "Offer", "name": "Public source snapshot", "price": "0.03", "priceCurrency": "USD"},
           {"@type": "Offer", "name": "30-day source change watch", "price": "1.00", "priceCurrency": "USD"},
           {"@type": "Offer", "name": "SEC Form D funding signals", "price": "0.05", "priceCurrency": "USD"},
           {"@type": "Offer", "name": "OFAC payment preflight", "price": "0.01", "priceCurrency": "USD"},
@@ -380,8 +381,8 @@
       <div class="hero">
         <div class="shell">
           <div class="eyebrow"><span class="live-dot"></span>Live on Base mainnet</div>
-          <h1>Source Watch for Agents</h1>
-          <p class="lead">Buy a 30-day monitoring job for any public HTTPS source, receive structured diffs through private polling or signed webhooks, and keep official SEC and OFAC evidence available on demand. No account, API key, or human checkout.</p>
+          <h1>Source Extraction + Watch for Agents</h1>
+          <p class="lead">Turn a public HTTPS source into signed, agent-ready text for $0.03, upgrade it to a 30-day change monitor, or retrieve official SEC and OFAC evidence on demand. No account, API key, or human checkout.</p>
           <div class="actions">
             <a class="action" href="/docs">Open API docs</a>
             <a class="action secondary" href="/.well-known/agent-service.json">Read machine manifest</a>
@@ -403,6 +404,15 @@
             <p class="section-note">Start with a long-running monitoring job when the value is in catching a future change. Use one-off evidence calls when the agent needs an answer now.</p>
           </div>
           <div class="endpoint-list">
+            <article class="endpoint">
+              <span class="method">POST</span>
+              <div>
+                <span class="endpoint-path">/v1/web/source-snapshot</span>
+                <p class="endpoint-copy">Fetch one public HTTPS HTML, JSON, XML, or text source as normalized agent-ready text. Includes optional literal excerpts, a content hash, an Ed25519-signed receipt, and a direct upgrade path to 30-day monitoring.</p>
+                <div class="endpoint-links"><a href="/v1/web/source-snapshot/sample">Free sample</a><a href="/docs#/default/public_source_snapshot_v1_web_source_snapshot_post">Open schema</a></div>
+              </div>
+              <div class="price">$0.03<small>per snapshot</small></div>
+            </article>
             <article class="endpoint">
               <span class="method">POST</span>
               <div>

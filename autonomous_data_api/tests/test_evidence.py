@@ -3,6 +3,7 @@ import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from autonomous_data_api.evidence import (
@@ -11,6 +12,7 @@ from autonomous_data_api.evidence import (
     OfacExactRequest,
     OfacPreflightRequest,
     PreparedResult,
+    PublicSourceSnapshotRequest,
     SecDeltaRequest,
     SecSignalRequest,
     SourceSnapshot,
@@ -51,6 +53,75 @@ def service(tmp_path, monkeypatch):
     )
     monkeypatch.setenv("AUTONOMOUS_ANALYTICS_HMAC_KEY", "evidence-test")
     return EvidenceService(tmp_path / "evidence.sqlite3")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://example.com/status",
+        "https://localhost/status",
+        "https://127.0.0.1/status",
+        "https://user:pass@example.com/status",
+        "https://example.com:8443/status",
+        "https://example.com/status#fragment",
+    ],
+)
+def test_public_source_snapshot_request_rejects_unsafe_urls(url):
+    with pytest.raises(ValueError):
+        PublicSourceSnapshotRequest(url=url)
+
+
+def test_public_source_snapshot_is_bounded_searchable_and_signed(tmp_path, monkeypatch):
+    from autonomous_data_api import monitors
+
+    evidence = service(tmp_path, monkeypatch)
+    normalized = "Alpha filing notice. Enforcement action one. Enforcement action two."
+    monkeypatch.setattr(
+        monitors,
+        "fetch_public_source",
+        lambda _url: (200, "text/html", normalized),
+    )
+
+    prepared = evidence.prepare_public_source_snapshot(
+        PublicSourceSnapshotRequest(
+            url="https://example.com/notices",
+            query="enforcement action",
+            max_characters=1000,
+        )
+    )
+
+    assert prepared.result["product"] == "PUBLIC_SOURCE_SNAPSHOT"
+    assert prepared.result["content"]["normalized_text"] == normalized
+    assert prepared.result["content"]["truncated"] is False
+    assert prepared.result["query"]["literal_match_count_returned"] == 2
+    assert prepared.result["upgrade"] == {
+        "path": "/v1/monitors/source-change",
+        "price": "$1.00",
+        "duration_days": 30,
+        "purpose": "Detect and deliver future changes to this source.",
+    }
+    assert prepared.result["receipt"]["algorithm"] == "Ed25519"
+    assert prepared.result["provenance"]["result_sha256"] == (
+        f"sha256:{prepared.result_hash}"
+    )
+
+
+def test_public_source_snapshot_quote_does_not_fetch(tmp_path, monkeypatch):
+    from autonomous_data_api import monitors
+
+    evidence = service(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        monitors,
+        "fetch_public_source",
+        lambda _url: (_ for _ in ()).throw(AssertionError("unexpected fetch")),
+    )
+
+    prepared = evidence.prepare_public_source_snapshot_quote(
+        PublicSourceSnapshotRequest(url="https://example.com/notices")
+    )
+
+    assert prepared.result["status"] == "PAYMENT_REQUIRED"
+    assert "receipt" not in prepared.result
 
 
 def test_ofac_exact_match_is_deterministic_and_signed(tmp_path, monkeypatch):

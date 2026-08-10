@@ -332,6 +332,54 @@ class WebMonitorCreateRequest(BaseModel):
         return cleaned
 
 
+class PublicSourceSnapshotRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    url: str = Field(min_length=12, max_length=2048)
+    query: str | None = Field(default=None, max_length=200)
+    max_characters: int = Field(default=12000, ge=1000, le=50000)
+
+    @field_validator("url")
+    @classmethod
+    def validate_public_https_url(cls, value: str) -> str:
+        cleaned = value.strip()
+        parsed = urlparse(cleaned)
+        if parsed.scheme.casefold() != "https" or not parsed.hostname:
+            raise ValueError("URL must use HTTPS and include a public hostname")
+        if parsed.username or parsed.password or parsed.fragment:
+            raise ValueError("URL credentials and fragments are not supported")
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError("URL port is invalid") from exc
+        if port not in (None, 443):
+            raise ValueError("only the default HTTPS port is supported")
+        hostname = parsed.hostname.casefold()
+        if hostname == "localhost" or hostname.endswith(
+            (".localhost", ".local", ".internal")
+        ):
+            raise ValueError("URL must use a public internet hostname")
+        try:
+            literal = ipaddress.ip_address(hostname)
+        except ValueError:
+            literal = None
+        if literal is not None and not literal.is_global:
+            raise ValueError("URL must use a public internet address")
+        return cleaned
+
+    @field_validator("query")
+    @classmethod
+    def normalize_query(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = " ".join(value.split())
+        if not cleaned:
+            return None
+        if any(ord(character) < 32 for character in cleaned):
+            raise ValueError("query contains control characters")
+        return cleaned
+
+
 class OfacExactRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1780,6 +1828,122 @@ class EvidenceService:
             include_receipt=False,
         )
 
+    def prepare_public_source_snapshot(
+        self, request: PublicSourceSnapshotRequest
+    ) -> PreparedResult:
+        # Local import avoids coupling the official-source parsers to the URL fetcher.
+        from autonomous_data_api.monitors import MonitorError, fetch_public_source
+
+        try:
+            http_status, content_type, normalized_text = fetch_public_source(
+                request.url
+            )
+        except MonitorError as exc:
+            raise EvidenceError(exc.code, exc.detail, exc.status_code) from exc
+
+        retrieved_at = utc_now()
+        content_hash = sha256_bytes(normalized_text.encode("utf-8"))
+        request_payload = request.model_dump(mode="json")
+        request_hash = sha256_json(request_payload)
+        retrieval_minute = (
+            datetime.now(timezone.utc).replace(second=0, microsecond=0).isoformat()
+        )
+        source_bundle_hash = sha256_json(
+            {
+                "url": request.url,
+                "content_sha256": content_hash,
+                "retrieval_minute": retrieval_minute,
+            }
+        )
+
+        excerpts: list[dict[str, Any]] = []
+        if request.query:
+            haystack = normalized_text.casefold()
+            needle = request.query.casefold()
+            offset = 0
+            while len(excerpts) < 5:
+                match_start = haystack.find(needle, offset)
+                if match_start < 0:
+                    break
+                excerpt_start = max(0, match_start - 240)
+                excerpt_end = min(len(normalized_text), match_start + len(needle) + 240)
+                excerpts.append(
+                    {
+                        "start_character": excerpt_start,
+                        "end_character": excerpt_end,
+                        "text": normalized_text[excerpt_start:excerpt_end],
+                    }
+                )
+                offset = match_start + max(1, len(needle))
+
+        returned_text = normalized_text[: request.max_characters]
+        result_core = {
+            "product": "PUBLIC_SOURCE_SNAPSHOT",
+            "url": request.url,
+            "retrieved_at": retrieved_at,
+            "http_status": http_status,
+            "content_type": content_type,
+            "content": {
+                "normalized_text": returned_text,
+                "content_sha256": f"sha256:{content_hash}",
+                "returned_characters": len(returned_text),
+                "total_normalized_characters": len(normalized_text),
+                "truncated": len(returned_text) < len(normalized_text),
+            },
+            "query": {
+                "value": request.query,
+                "literal_match_count_returned": len(excerpts),
+                "excerpts": excerpts,
+            },
+            "upgrade": {
+                "path": "/v1/monitors/source-change",
+                "price": "$1.00",
+                "duration_days": 30,
+                "purpose": "Detect and deliver future changes to this source.",
+            },
+            "provenance": {
+                "engine_version": "public-source-snapshot/0.1.0",
+                "request_sha256": f"sha256:{request_hash}",
+                "source_bundle_sha256": f"sha256:{source_bundle_hash}",
+                "result_sha256": None,
+            },
+            "limitations": [
+                "Public HTTPS text, HTML, JSON, and XML sources only.",
+                "JavaScript-rendered content, redirects, and authenticated pages are not supported.",
+                "Query matching is literal and case-insensitive; it is not semantic search.",
+                "The signed receipt proves this response hash, not publisher authorship or truth.",
+            ],
+        }
+        return self._store_prepared(
+            "public_source_snapshot",
+            request_hash,
+            source_bundle_hash,
+            result_core,
+        )
+
+    def prepare_public_source_snapshot_quote(
+        self, request: PublicSourceSnapshotRequest
+    ) -> PreparedResult:
+        request_payload = request.model_dump(mode="json")
+        request_hash = sha256_json(request_payload)
+        source_bundle_hash = sha256_bytes(b"public-source-snapshot-quote/0.1.0")
+        return self._store_prepared(
+            "public_source_snapshot_quote",
+            request_hash,
+            source_bundle_hash,
+            {
+                "product": "PUBLIC_SOURCE_SNAPSHOT",
+                "url": request.url,
+                "status": "PAYMENT_REQUIRED",
+                "provenance": {
+                    "engine_version": "public-source-snapshot/0.1.0",
+                    "request_sha256": f"sha256:{request_hash}",
+                    "result_sha256": None,
+                },
+            },
+            include_receipt=False,
+        )
+
     def prepare_sec(self, request: SecDeltaRequest) -> PreparedResult:
         request_payload = request.model_dump(mode="json")
         request_hash = sha256_json(request_payload)
@@ -2501,6 +2665,14 @@ class EvidenceService:
             return status
 
         route_metadata = {
+            "/v1/web/source-snapshot": {
+                "tier": "one-shot-extraction",
+                "price_usd": "0.03",
+                "hypothesis": (
+                    "Agents will pay for normalized public-source text, literal excerpts, "
+                    "a content hash, and a signed receipt without managing a scraper."
+                ),
+            },
             "/v1/monitors/source-change": {
                 "tier": "long-running-job",
                 "price_usd": "1.00",

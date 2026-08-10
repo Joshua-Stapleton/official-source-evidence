@@ -52,6 +52,7 @@ from autonomous_data_api.evidence import (
     OfacExactRequest,
     OfacPreflightRequest,
     PreparedResult,
+    PublicSourceSnapshotRequest,
     SecDeltaRequest,
     SecSignalRequest,
     WebMonitorCreateRequest,
@@ -69,6 +70,7 @@ X402_SEC_SIGNAL_PRICE = os.getenv("AUTONOMOUS_X402_SEC_SIGNAL_PRICE", "$0.01")
 X402_OFAC_PREFLIGHT_PRICE = os.getenv("AUTONOMOUS_X402_OFAC_PREFLIGHT_PRICE", "$0.01")
 X402_FORM_D_PRICE = os.getenv("AUTONOMOUS_X402_FORM_D_PRICE", "$0.05")
 X402_SOURCE_WATCH_PRICE = os.getenv("AUTONOMOUS_X402_SOURCE_WATCH_PRICE", "$1.00")
+X402_SOURCE_SNAPSHOT_PRICE = os.getenv("AUTONOMOUS_X402_SOURCE_SNAPSHOT_PRICE", "$0.03")
 CONVERSION_EXPERIMENT_START_UTC = os.getenv(
     "AUTONOMOUS_CONVERSION_EXPERIMENT_START_UTC", ""
 ).strip()
@@ -140,6 +142,11 @@ FORM_D_PROBE_PAYLOAD = {
 SOURCE_WATCH_PROBE_PAYLOAD = {
     "url": "https://www.sec.gov/newsroom/press-releases",
     "label": "SEC press releases",
+}
+SOURCE_SNAPSHOT_PROBE_PAYLOAD = {
+    "url": "https://www.sec.gov/newsroom/press-releases",
+    "query": "enforcement",
+    "max_characters": 12000,
 }
 
 
@@ -231,11 +238,11 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="Agent Evidence and Source Watch API",
-    version="0.6.0",
+    version="0.7.0",
     description=(
-        "Long-running source-change monitoring plus pay-per-call SEC Form D GTM "
-        "signals, source-hashed EDGAR filing deltas, and exact OFAC identifier "
-        "evidence for autonomous agents. No accounts or API keys. "
+        "One-shot public-source extraction, long-running source-change monitoring, "
+        "pay-per-call SEC Form D GTM signals, source-hashed EDGAR filing deltas, "
+        "and exact OFAC identifier evidence for autonomous agents. No accounts or API keys. "
         "No investment advice, sanctions clearance, compliance determination, or legal advice."
     ),
     contact={"name": "Regulavita", "email": "joshua@regulavita.com"},
@@ -302,6 +309,117 @@ x402_server = x402ResourceServer(x402_facilitator)
 x402_server.register(X402_NETWORK, ExactEvmServerScheme())
 
 x402_routes: dict[str, RouteConfig] = {
+    "POST /v1/web/source-snapshot": RouteConfig(
+        accepts=[
+            PaymentOption(
+                scheme="exact",
+                pay_to=X402_PAY_TO,
+                price=X402_SOURCE_SNAPSHOT_PRICE,
+                network=X402_NETWORK,
+            )
+        ],
+        mime_type="application/json",
+        description=(
+            "Fetch one public HTTPS HTML, JSON, XML, or text source and return "
+            "normalized agent-ready text, optional literal-match excerpts, a "
+            "content hash, and an Ed25519-signed receipt. No account or API key."
+        ),
+        service_name="Public Source Snapshot",
+        tags=[
+            "content-extraction",
+            "web-reader",
+            "web-scraping",
+            "llm-context",
+            "source-hash",
+            "provenance",
+            "signed-evidence",
+            "text-normalization",
+        ],
+        icon_url=SERVICE_ICON_URL,
+        extensions=get_discovery_extension(
+            method="POST",
+            input=SOURCE_SNAPSHOT_PROBE_PAYLOAD,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "format": "uri",
+                        "pattern": "^https://",
+                        "maxLength": 2048,
+                        "description": "Public HTTPS source to fetch once.",
+                    },
+                    "query": {
+                        "type": "string",
+                        "maxLength": 200,
+                        "description": "Optional literal case-insensitive phrase for excerpts.",
+                    },
+                    "max_characters": {
+                        "type": "integer",
+                        "minimum": 1000,
+                        "maximum": 50000,
+                        "default": 12000,
+                    },
+                },
+                "required": ["url"],
+                "additionalProperties": False,
+            },
+            output=OutputConfig(
+                example={
+                    "request_id": "public_source_snapshot_example",
+                    "product": "PUBLIC_SOURCE_SNAPSHOT",
+                    "url": "https://www.sec.gov/newsroom/press-releases",
+                    "retrieved_at": "2026-08-10T00:00:00Z",
+                    "http_status": 200,
+                    "content_type": "text/html",
+                    "content": {
+                        "normalized_text": "SEC press release text...",
+                        "content_sha256": f"sha256:{'0' * 64}",
+                        "returned_characters": 25,
+                        "total_normalized_characters": 25,
+                        "truncated": False,
+                    },
+                    "query": {
+                        "value": "enforcement",
+                        "literal_match_count_returned": 1,
+                        "excerpts": [],
+                    },
+                    "upgrade": {"path": "/v1/monitors/source-change"},
+                    "provenance": {"engine_version": "public-source-snapshot/0.1.0"},
+                    "receipt": {"algorithm": "Ed25519"},
+                },
+                schema={
+                    "type": "object",
+                    "required": [
+                        "request_id",
+                        "product",
+                        "url",
+                        "retrieved_at",
+                        "http_status",
+                        "content_type",
+                        "content",
+                        "query",
+                        "upgrade",
+                        "provenance",
+                        "receipt",
+                    ],
+                    "properties": {
+                        "request_id": {"type": "string"},
+                        "product": {"const": "PUBLIC_SOURCE_SNAPSHOT"},
+                        "url": {"type": "string", "format": "uri"},
+                        "retrieved_at": {"type": "string", "format": "date-time"},
+                        "http_status": {"type": "integer"},
+                        "content_type": {"type": "string"},
+                        "content": {"type": "object"},
+                        "query": {"type": "object"},
+                        "upgrade": {"type": "object"},
+                        "provenance": {"type": "object"},
+                        "receipt": {"type": "object"},
+                    },
+                },
+            ),
+        ),
+    ),
     "POST /v1/monitors/source-change": RouteConfig(
         accepts=[
             PaymentOption(
@@ -967,6 +1085,12 @@ def referrer_origin(value: str | None) -> str | None:
 
 class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
     ROUTES: ClassVar[dict[str, tuple[type[BaseModel], str, str, dict[str, Any]]]] = {
+        "/v1/web/source-snapshot": (
+            PublicSourceSnapshotRequest,
+            "prepare_public_source_snapshot",
+            X402_SOURCE_SNAPSHOT_PRICE,
+            SOURCE_SNAPSHOT_PROBE_PAYLOAD,
+        ),
         "/v1/monitors/source-change": (
             WebMonitorCreateRequest,
             "prepare_web_monitor",
@@ -1120,8 +1244,14 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
                 },
             )
         request.state.evidence_validated = validated
+        payment_signature = request.headers.get(
+            "payment-signature"
+        ) or request.headers.get("x-payment")
         try:
-            prepare_method = getattr(self.service, prepare_method_name)
+            if request.url.path == "/v1/web/source-snapshot" and not payment_signature:
+                prepare_method = self.service.prepare_public_source_snapshot_quote
+            else:
+                prepare_method = getattr(self.service, prepare_method_name)
             prepared: PreparedResult = await run_in_threadpool(
                 prepare_method, validated
             )
@@ -1132,9 +1262,6 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
             )
 
         request.state.evidence_prepared = prepared
-        payment_signature = request.headers.get(
-            "payment-signature"
-        ) or request.headers.get("x-payment")
         if payment_signature and not await run_in_threadpool(
             self.service.bind_payment,
             payment_signature,
@@ -1267,6 +1394,7 @@ app.add_middleware(
     network=X402_NETWORK,
     daily_cap=X402_DAILY_REVENUE_CAP_USD,
     route_prices={
+        ("POST", "/v1/web/source-snapshot"): price_decimal(X402_SOURCE_SNAPSHOT_PRICE),
         ("POST", "/v1/monitors/source-change"): price_decimal(X402_SOURCE_WATCH_PRICE),
         ("POST", "/v1/gtm/form-d-funding-leads"): price_decimal(X402_FORM_D_PRICE),
         ("POST", "/v1/ofac/payment-preflight"): price_decimal(
@@ -1317,6 +1445,7 @@ def health() -> dict[str, Any]:
         "x402": {
             "network": X402_NETWORK,
             "prices": {
+                "public_source_snapshot": X402_SOURCE_SNAPSHOT_PRICE,
                 "source_change_watch_30_day": X402_SOURCE_WATCH_PRICE,
                 "form_d_funding_leads": X402_FORM_D_PRICE,
                 "ofac_preflight": X402_OFAC_PREFLIGHT_PRICE,
@@ -1390,6 +1519,7 @@ def sitemap() -> Response:
         "/",
         "/docs",
         "/openapi.json",
+        "/v1/web/source-snapshot/sample",
         "/v1/monitors/source-change/sample",
         "/v1/gtm/form-d-funding-leads/sample",
         "/v1/sec/sample",
@@ -1412,6 +1542,7 @@ def llms_txt() -> PlainTextResponse:
 Long-running monitoring jobs and pay-per-call official-source evidence for autonomous agents. No account or API key.
 
 ## Paid endpoints
+- POST {base_url}/v1/web/source-snapshot - $0.03 USDC. Fetch one public HTTPS HTML, JSON, XML, or text source as normalized agent-ready text with optional literal excerpts, a content hash, and an Ed25519-signed receipt.
 - POST {base_url}/v1/monitors/source-change - $1.00 USDC. Monitor one public HTTPS text, HTML, JSON, or XML source every six hours for 30 days. Private polling and optional HMAC-signed change webhooks are included.
 - POST {base_url}/v1/gtm/form-d-funding-leads - $0.05 USDC. Find newly filed SEC Form D private-offering signals for GTM workflows. Filter by issuer state, industry keyword, and reported amount sold; returns official links, related people, and a cursor.
 - POST {base_url}/v1/ofac/payment-preflight - $0.01 USDC. Before sending funds, check whether an exact EVM destination address appears in current official OFAC SDN or Consolidated data. Compact decision output; no signed receipt.
@@ -1423,6 +1554,7 @@ Long-running monitoring jobs and pay-per-call official-source evidence for auton
 - OpenAPI: {base_url}/openapi.json
 - Agent manifest: {base_url}/.well-known/agent-service.json
 - Interactive docs: {base_url}/docs
+- Public Source Snapshot sample: {base_url}/v1/web/source-snapshot/sample
 - Source Watch sample: {base_url}/v1/monitors/source-change/sample
 - Form D sample: {base_url}/v1/gtm/form-d-funding-leads/sample
 - OFAC sample: {base_url}/v1/ofac/sample
@@ -1444,8 +1576,9 @@ def agent_manifest() -> dict[str, Any]:
     return {
         "name": "Agent Evidence and Source Watch API",
         "description": (
-            "Long-running source-change monitors plus pay-per-call SEC Form D GTM "
-            "signals, OFAC payment preflight, SEC filing decisions, and signed receipts."
+            "One-shot public-source extraction and long-running source-change "
+            "monitors plus pay-per-call SEC Form D GTM signals, OFAC payment "
+            "preflight, SEC filing decisions, and signed receipts."
         ),
         "contact": "joshua@regulavita.com",
         "icon_url": SERVICE_ICON_URL,
@@ -1454,6 +1587,7 @@ def agent_manifest() -> dict[str, Any]:
             "protocol": "x402-v2",
             "network": X402_NETWORK,
             "prices": {
+                "/v1/web/source-snapshot": X402_SOURCE_SNAPSHOT_PRICE,
                 "/v1/monitors/source-change": X402_SOURCE_WATCH_PRICE,
                 "/v1/gtm/form-d-funding-leads": X402_FORM_D_PRICE,
                 "/v1/ofac/payment-preflight": X402_OFAC_PREFLIGHT_PRICE,
@@ -1471,12 +1605,14 @@ def agent_manifest() -> dict[str, Any]:
         "openapi_url": f"{base_url}/openapi.json",
         "llms_url": f"{base_url}/llms.txt",
         "sample_endpoints": [
+            f"{base_url}/v1/web/source-snapshot/sample",
             f"{base_url}/v1/monitors/source-change/sample",
             f"{base_url}/v1/gtm/form-d-funding-leads/sample",
             f"{base_url}/v1/sec/sample",
             f"{base_url}/v1/ofac/sample",
         ],
         "agent_paid_endpoints": [
+            f"{base_url}/v1/web/source-snapshot",
             f"{base_url}/v1/monitors/source-change",
             f"{base_url}/v1/gtm/form-d-funding-leads",
             f"{base_url}/v1/ofac/payment-preflight",
@@ -1491,6 +1627,39 @@ def agent_manifest() -> dict[str, Any]:
             "Form D is an issuer-filed notice, not proof of the total funding raised.",
             "No investment advice or materiality opinion.",
             "No sanctions clearance, transaction authorization, or fuzzy screening.",
+        ],
+    }
+
+
+@app.get("/v1/web/source-snapshot/sample")
+def public_source_snapshot_sample() -> dict[str, Any]:
+    return {
+        "sample_type": "static_contract_fixture",
+        "endpoint": {
+            "path": "/v1/web/source-snapshot",
+            "price": X402_SOURCE_SNAPSHOT_PRICE,
+            "payment": "x402 v2 USDC on Base",
+        },
+        "request": SOURCE_SNAPSHOT_PROBE_PAYLOAD,
+        "service": {
+            "supported_content": ["HTML", "JSON", "plain text", "XML"],
+            "maximum_response_bytes": 1000000,
+            "maximum_returned_characters": 50000,
+            "query_matching": "literal case-insensitive excerpts",
+        },
+        "response_shape": {
+            "content": {
+                "normalized_text": "Source text...",
+                "content_sha256": f"sha256:{'0' * 64}",
+                "truncated": False,
+            },
+            "query": {"literal_match_count_returned": 1, "excerpts": []},
+            "upgrade": {"path": "/v1/monitors/source-change", "price": "$1.00"},
+            "receipt": {"algorithm": "Ed25519"},
+        },
+        "limitations": [
+            "Public HTTPS sources only.",
+            "No JavaScript rendering, login, cookies, or redirect following.",
         ],
     }
 
@@ -1755,6 +1924,18 @@ def form_d_funding_leads(
     return prepared.result
 
 
+@app.post("/v1/web/source-snapshot")
+def public_source_snapshot(
+    request: Request,
+    payload: PublicSourceSnapshotRequest | None = None,
+) -> dict[str, Any]:
+    del payload
+    prepared: PreparedResult | None = getattr(request.state, "evidence_prepared", None)
+    if prepared is None:
+        raise HTTPException(status_code=503, detail="Prepared result unavailable")
+    return prepared.result
+
+
 @app.post("/v1/ofac/payment-preflight")
 def ofac_payment_preflight(
     request: Request,
@@ -1911,7 +2092,9 @@ def custom_openapi() -> dict[str, Any]:
         "MonitorBearer"
     ] = {"type": "http", "scheme": "bearer"}
     schema["info"]["x-guidance"] = (
-        "Use POST /v1/monitors/source-change to buy a 30-day, six-hour-cadence "
+        "Use POST /v1/web/source-snapshot for a one-shot normalized public-source "
+        "extract with a content hash and signed receipt. Upgrade to POST "
+        "/v1/monitors/source-change to buy a 30-day, six-hour-cadence "
         "monitor for one public HTTPS source, with private polling and optional "
         "signed webhooks. Use POST /v1/gtm/form-d-funding-leads for cursor-based private-company "
         "sales triggers derived from official SEC Form D notices. Use POST "
@@ -1925,6 +2108,14 @@ def custom_openapi() -> dict[str, Any]:
     )
 
     paid_operations: dict[str, dict[str, Any]] = {
+        "/v1/web/source-snapshot": {
+            "price": f"{price_decimal(X402_SOURCE_SNAPSHOT_PRICE):.6f}",
+            "example": SOURCE_SNAPSHOT_PROBE_PAYLOAD,
+            "description": (
+                "One-shot public HTTPS content extraction with normalized text, "
+                "optional literal excerpts, a content hash, and a signed receipt."
+            ),
+        },
         "/v1/monitors/source-change": {
             "price": f"{price_decimal(X402_SOURCE_WATCH_PRICE):.6f}",
             "example": SOURCE_WATCH_PROBE_PAYLOAD,

@@ -15,6 +15,7 @@ pre-registered in [SOURCE_WATCH_EXPERIMENT.md](autonomous_data_api/SOURCE_WATCH_
 
 | Endpoint | Result | Price |
 | --- | --- | ---: |
+| `POST /v1/web/source-snapshot` | One-shot normalized extraction from a public HTTPS HTML, JSON, XML, or text source, with optional literal excerpts, a content hash, and a signed receipt | $0.03 USDC |
 | `POST /v1/monitors/source-change` | Monitor one public HTTPS text, HTML, JSON, or XML source every six hours for 30 days, with private polling and optional signed webhooks | $1.00 USDC |
 | `POST /v1/gtm/form-d-funding-leads` | New SEC Form D private-offering signals filtered by issuer state, industry keyword, and reported amount sold, with related people, official links, and a cursor | $0.05 USDC |
 | `POST /v1/ofac/payment-preflight` | Compact stop/no-exact-match decision for an EVM destination address against current official OFAC data | $0.01 USDC |
@@ -53,6 +54,7 @@ Inspect the free contracts before paying:
 curl https://evidence.regulavita.com/v1/ofac/sample
 curl https://evidence.regulavita.com/v1/sec/sample
 curl https://evidence.regulavita.com/v1/gtm/form-d-funding-leads/sample
+curl https://evidence.regulavita.com/v1/web/source-snapshot/sample
 curl https://evidence.regulavita.com/v1/monitors/source-change/sample
 curl https://evidence.regulavita.com/llms.txt
 ```

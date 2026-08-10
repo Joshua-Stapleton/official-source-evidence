@@ -7,6 +7,8 @@ are in [`FORM_D_EXPERIMENT.md`](FORM_D_EXPERIMENT.md).
 
 Paid candidates:
 
+- `POST /v1/web/source-snapshot` at `$0.03` USDC per fulfilled call.
+- `POST /v1/monitors/source-change` at `$1.00` USDC per 30-day monitor.
 - `POST /v1/gtm/form-d-funding-leads` at `$0.05` USDC per fulfilled call.
 - `POST /v1/ofac/payment-preflight` at `$0.01` USDC per fulfilled call.
 - `POST /v1/sec/filing-change-signal` at `$0.01` USDC per fulfilled call.
@@ -16,6 +18,13 @@ Paid candidates:
 The PFAS and grid lead endpoints remain available for prior API-key experiments, but their x402 routes return `410 RETIRED_WEDGE` and are not promoted in the agent manifest.
 
 ## Product Boundaries
+
+The public-source snapshot endpoint fetches one public HTTPS HTML, JSON, XML, or
+plain-text resource and returns bounded normalized text, optional literal-match
+excerpts, a content hash, and a signed receipt. It does not render JavaScript,
+follow redirects, access authenticated pages, or make claims about publisher
+authorship or truth. Successful buyers can upgrade the same URL to the 30-day
+Source Watch product without requiring a new account or credential.
 
 The Form D GTM endpoint scans official SEC daily indexes in bounded pages. It
 filters new filings by issuer state, industry keyword, and issuer-reported amount
@@ -69,6 +78,7 @@ Useful local URLs:
 - `http://127.0.0.1:8765/docs`
 - `http://127.0.0.1:8765/.well-known/agent-service.json`
 - `http://127.0.0.1:8765/v1/experiments/status`
+- `http://127.0.0.1:8765/v1/web/source-snapshot/sample`
 - `http://127.0.0.1:8765/v1/gtm/form-d-funding-leads/sample`
 - `http://127.0.0.1:8765/v1/sec/sample`
 - `http://127.0.0.1:8765/v1/ofac/sample`

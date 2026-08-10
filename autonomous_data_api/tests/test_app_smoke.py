@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient
 
 from autonomous_data_api.app import (
     FORM_D_PROBE_PAYLOAD,
+    SOURCE_SNAPSHOT_PROBE_PAYLOAD,
     SOURCE_WATCH_PROBE_PAYLOAD,
     CdpFacilitatorAuthProvider,
     MainnetRevenueCapMiddleware,
@@ -74,6 +75,16 @@ def prepared(monkeypatch):
         evidence_service,
         "prepare_web_monitor",
         lambda _: make("source_change_watch"),
+    )
+    monkeypatch.setattr(
+        evidence_service,
+        "prepare_public_source_snapshot",
+        lambda _: make("public_source_snapshot"),
+    )
+    monkeypatch.setattr(
+        evidence_service,
+        "prepare_public_source_snapshot_quote",
+        lambda _: make("public_source_snapshot_quote"),
     )
 
 
@@ -134,6 +145,7 @@ def test_health_and_retired_wedges(client):
     assert health.status_code == 200
     assert health.json()["x402"]["network"] == "eip155:84532"
     assert health.json()["x402"]["prices"] == {
+        "public_source_snapshot": "$0.03",
         "source_change_watch_30_day": "$1.00",
         "form_d_funding_leads": "$0.05",
         "ofac_preflight": "$0.01",
@@ -160,6 +172,7 @@ def test_agent_manifest_promotes_only_verdict_endpoints(client):
     assert payload["openapi_url"].endswith("/openapi.json")
     assert payload["payment"]["protocol"] == "x402-v2"
     assert payload["agent_paid_endpoints"] == [
+        "http://localhost:8765/v1/web/source-snapshot",
         "http://localhost:8765/v1/monitors/source-change",
         "http://localhost:8765/v1/gtm/form-d-funding-leads",
         "http://localhost:8765/v1/ofac/payment-preflight",
@@ -178,6 +191,7 @@ def test_machine_discovery_and_crawler_surfaces(client):
     assert schema["servers"] == [{"url": "http://localhost:8765"}]
 
     expected = {
+        "/v1/web/source-snapshot": "0.030000",
         "/v1/monitors/source-change": "1.000000",
         "/v1/gtm/form-d-funding-leads": "0.050000",
         "/v1/ofac/payment-preflight": "0.010000",
@@ -212,6 +226,7 @@ def test_machine_discovery_and_crawler_surfaces(client):
 
     llms = client.get("/llms.txt")
     assert llms.status_code == 200
+    assert "/v1/web/source-snapshot - $0.03 USDC" in llms.text
     assert "/v1/ofac/payment-preflight - $0.01 USDC" in llms.text
     assert "/v1/gtm/form-d-funding-leads - $0.05 USDC" in llms.text
     assert "/v1/sec/filing-change-signal - $0.01 USDC" in llms.text
@@ -232,6 +247,13 @@ def test_machine_discovery_and_crawler_surfaces(client):
 @pytest.mark.parametrize(
     ("path", "body", "expected_tag", "expected_amount", "expected_service"),
     [
+        (
+            "/v1/web/source-snapshot",
+            SOURCE_SNAPSHOT_PROBE_PAYLOAD,
+            "content-extraction",
+            "30000",
+            "Public Source Snapshot",
+        ),
         (
             "/v1/monitors/source-change",
             SOURCE_WATCH_PROBE_PAYLOAD,
@@ -318,6 +340,7 @@ def test_verdict_routes_advertise_payment_and_bazaar_post_schema(
 @pytest.mark.parametrize(
     ("path", "expected_amount"),
     [
+        ("/v1/web/source-snapshot", "30000"),
         ("/v1/monitors/source-change", "1000000"),
         ("/v1/gtm/form-d-funding-leads", "50000"),
         ("/v1/ofac/payment-preflight", "10000"),
