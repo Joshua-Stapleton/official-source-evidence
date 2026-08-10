@@ -2365,6 +2365,15 @@ class EvidenceService:
             return status
 
         route_metadata = {
+            "/v1/monitors/source-change": {
+                "tier": "long-running-job",
+                "price_usd": "1.00",
+                "cohort_start_utc": "2026-08-10T08:41:32Z",
+                "hypothesis": (
+                    "Agents will pay for a persistent monitoring job that removes "
+                    "repeated polling, state management, and change delivery."
+                ),
+            },
             "/v1/gtm/form-d-funding-leads": {
                 "tier": "gtm-signal",
                 "price_usd": "0.05",

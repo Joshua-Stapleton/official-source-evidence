@@ -499,6 +499,14 @@ def test_conversion_experiment_excludes_probes_and_owner_payments(
             "OWNER",
             "FULFILLED",
         ),
+        (
+            "2026-08-10T10:00:00+00:00",
+            "/v1/monitors/source-change",
+            "$1.00",
+            "buyer-d",
+            "NON_OWNER_UNVERIFIED",
+            "FULFILLED",
+        ),
     ]
     with evidence._connect() as connection:
         for index, row in enumerate(rows):
@@ -531,13 +539,21 @@ def test_conversion_experiment_excludes_probes_and_owner_payments(
     status = evidence.experiment_status("2026-08-04T09:13:21Z")
     experiment = status["conversion_experiment"]
 
-    assert experiment["independent_buyer_clusters"] == 2
+    assert experiment["independent_buyer_clusters"] == 3
     assert experiment["repeat_independent_buyer_clusters"] == 1
-    assert experiment["independent_fulfilled_calls"] == 3
-    assert experiment["independent_revenue_usd"] == "0.03"
-    assert experiment["independent_paid_fulfillment_rate_percent"] == 75.0
-    assert experiment["max_independent_buyer_call_share"] == 0.6667
-    assert experiment["gates"]["no_buyer_above_50_percent_of_calls"] is False
+    assert experiment["independent_fulfilled_calls"] == 4
+    assert experiment["independent_revenue_usd"] == "1.03"
+    assert experiment["independent_paid_fulfillment_rate_percent"] == 80.0
+    assert experiment["max_independent_buyer_call_share"] == 0.5
+    assert experiment["gates"]["no_buyer_above_50_percent_of_calls"] is True
+    source_watch = next(
+        route
+        for route in experiment["routes"]
+        if route["route"] == "/v1/monitors/source-change"
+    )
+    assert source_watch["tier"] == "long-running-job"
+    assert source_watch["independent_fulfilled_calls"] == 1
+    assert source_watch["independent_revenue_usd"] == "1.00"
     form_d = next(
         route
         for route in experiment["routes"]
