@@ -4,8 +4,10 @@ import asyncio
 import base64
 import binascii
 import hashlib
+import ipaddress
 import json
 import os
+import re
 import sqlite3
 import time
 from contextlib import asynccontextmanager
@@ -898,6 +900,71 @@ def find_wallet(value: Any) -> str | None:
     return None
 
 
+def request_client_identifier(request: Request) -> str:
+    fly_client_ip = request.headers.get("fly-client-ip", "").strip()
+    if fly_client_ip:
+        try:
+            return str(ipaddress.ip_address(fly_client_ip))
+        except ValueError:
+            pass
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
+
+
+def user_agent_family(user_agent: str | None) -> str:
+    value = (user_agent or "").casefold()
+    if not value:
+        return "unknown"
+    if "coinbase" in value or "coinbase-cdp" in value:
+        return "coinbase-cdp"
+    if "x402-list" in value:
+        return "x402-list"
+    if "x402scan" in value:
+        return "x402scan"
+    if "httpx" in value:
+        return "python-httpx"
+    if "python-requests" in value:
+        return "python-requests"
+    if "axios" in value:
+        return "node-axios"
+    if "node" in value or "undici" in value:
+        return "node-http"
+    if "curl" in value:
+        return "curl"
+    if "mozilla/" in value:
+        return "browser"
+    return "other"
+
+
+def normalized_header_token(value: str | None, max_length: int) -> str | None:
+    if not value:
+        return None
+    normalized = value.strip().casefold()
+    if len(normalized) > max_length or not re.fullmatch(
+        r"[a-z0-9][a-z0-9._:-]*", normalized
+    ):
+        return None
+    return normalized
+
+
+def referrer_origin(value: str | None) -> str | None:
+    if not value or len(value) > 2048:
+        return None
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return None
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    default_port = (parsed.scheme == "http" and port == 80) or (
+        parsed.scheme == "https" and port == 443
+    )
+    port_suffix = f":{port}" if port and not default_port else ""
+    return f"{parsed.scheme}://{parsed.hostname.casefold()}{port_suffix}"
+
+
 class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
     ROUTES: ClassVar[dict[str, tuple[type[BaseModel], str, str, dict[str, Any]]]] = {
         "/v1/monitors/source-change": (
@@ -952,9 +1019,7 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
         identity = (
             hashlib.sha256(payment_signature.encode("utf-8")).hexdigest()
             if payment_signature
-            else request.client.host
-            if request.client
-            else "unknown"
+            else request_client_identifier(request)
         )
         key = f"{request.url.path}:{identity}"
         limit = int(os.getenv("AUTONOMOUS_EVIDENCE_REQUESTS_PER_MINUTE", "30"))
@@ -1105,6 +1170,8 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
         else:
             response_status = f"HTTP_{response.status_code}"
         try:
+            client_identifier = request_client_identifier(request)
+            raw_user_agent = request.headers.get("user-agent")
             await run_in_threadpool(
                 self.service.record_attempt,
                 prepared,
@@ -1116,6 +1183,21 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
                 payment_signature=payment_signature,
                 settlement_tx_hash=settlement_tx_hash,
                 payer_wallet=payer_wallet,
+                client_identifier=client_identifier,
+                user_agent=raw_user_agent,
+                user_agent_family=user_agent_family(raw_user_agent),
+                referrer_origin=referrer_origin(request.headers.get("referer")),
+                edge_region=normalized_header_token(
+                    request.headers.get("fly-region"), 16
+                ),
+                proxy_request_id=normalized_header_token(
+                    request.headers.get("fly-request-id"), 128
+                ),
+                discovery_source=normalized_header_token(
+                    request.headers.get("x-agent-discovery-source"), 64
+                ),
+                agent_run_id=request.headers.get("x-agent-run-id"),
+                http_status=response.status_code,
             )
         except (sqlite3.Error, OSError):
             # A ledger outage must be visible in monitoring, but must not corrupt a valid receipt.
@@ -1345,6 +1427,10 @@ Long-running monitoring jobs and pay-per-call official-source evidence for auton
 - Form D sample: {base_url}/v1/gtm/form-d-funding-leads/sample
 - OFAC sample: {base_url}/v1/ofac/sample
 - SEC sample: {base_url}/v1/sec/sample
+
+## Optional attribution headers
+- X-Agent-Discovery-Source: a short source token such as coinbase-bazaar, x402-list, or direct
+- X-Agent-Run-Id: a stable run identifier; stored only as a keyed HMAC and useful for repeat-run measurement
 
 ## Boundaries
 Source Watch supports public HTTPS sources only and does not render JavaScript or access authenticated pages. Exact source evidence and factual GTM signals only. Form D is a notice, not proof of total funding raised. No fuzzy sanctions screening, sanctions clearance, transaction authorization, materiality opinion, investment advice, or legal advice.

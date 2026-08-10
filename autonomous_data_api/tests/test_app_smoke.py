@@ -338,6 +338,51 @@ def test_empty_post_is_a_monitorable_payment_probe(
     assert challenge["resource"]["url"].endswith(path)
 
 
+def test_payment_attempt_captures_privacy_safe_agent_attribution(
+    client, prepared, monkeypatch
+):
+    captured = {}
+
+    def capture_attempt(_prepared, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(evidence_service, "record_attempt", capture_attempt)
+    response = client.post(
+        "/v1/ofac/payment-preflight",
+        headers={
+            "Fly-Client-IP": "203.0.113.42",
+            "Fly-Region": "IAD",
+            "Fly-Request-Id": "01test-iad",
+            "User-Agent": "Coinbase-CDP-Test/1.0",
+            "Referer": "https://agents.example/discover?q=private",
+            "X-Agent-Discovery-Source": "Coinbase-Bazaar",
+            "X-Agent-Run-Id": "private-run-123",
+        },
+    )
+
+    assert response.status_code == 402
+    assert captured == {
+        "route": "/v1/ofac/payment-preflight",
+        "quoted_price": "$0.01",
+        "network": "eip155:84532",
+        "response_status": "PAYMENT_REQUIRED",
+        "latency_ms": captured["latency_ms"],
+        "payment_signature": None,
+        "settlement_tx_hash": None,
+        "payer_wallet": None,
+        "client_identifier": "203.0.113.42",
+        "user_agent": "Coinbase-CDP-Test/1.0",
+        "user_agent_family": "coinbase-cdp",
+        "referrer_origin": "https://agents.example",
+        "edge_region": "iad",
+        "proxy_request_id": "01test-iad",
+        "discovery_source": "coinbase-bazaar",
+        "agent_run_id": "private-run-123",
+        "http_status": 402,
+    }
+    assert captured["latency_ms"] >= 0
+
+
 def test_nonempty_invalid_json_is_still_rejected_before_payment(client):
     response = client.post(
         "/v1/ofac/exact-identifier-evidence",

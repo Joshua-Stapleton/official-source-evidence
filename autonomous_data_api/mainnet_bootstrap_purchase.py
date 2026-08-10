@@ -55,6 +55,31 @@ PRODUCTS = {
             "lists": ["SDN", "CONSOLIDATED"],
         },
     },
+    "ofac_preflight": {
+        "endpoint": "https://evidence.regulavita.com/v1/ofac/payment-preflight",
+        "amount_atomic": "10000",
+        "arm_value": "0.01",
+        "payload": {
+            "address": "0x0000000000000000000000000000000000000000",
+            "network": "eip155:8453",
+        },
+    },
+    "sec_signal": {
+        "endpoint": "https://evidence.regulavita.com/v1/sec/filing-change-signal",
+        "amount_atomic": "10000",
+        "arm_value": "0.01",
+        "payload": {
+            "ticker": "AAPL",
+            "since": (
+                (datetime.now(timezone.utc) - timedelta(days=3))
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z")
+            ),
+            "forms": ["8-K", "10-Q", "10-K"],
+            "max_source_age_seconds": 600,
+        },
+    },
     "sec": {
         "endpoint": "https://evidence.regulavita.com/v1/sec/filing-trigger-delta",
         "amount_atomic": "100000",
@@ -126,7 +151,10 @@ async def main() -> None:
         )
 
     request_endpoint = product["endpoint"]
-    request_headers: dict[str, str] = {}
+    request_headers = {
+        "X-Agent-Discovery-Source": "owner-bootstrap",
+        "X-Agent-Run-Id": f"owner-bootstrap-{args.product}",
+    }
     ingress_origin = os.getenv("MAINNET_BOOTSTRAP_INGRESS_ORIGIN", "").strip()
     if ingress_origin:
         canonical = urlparse(product["endpoint"])

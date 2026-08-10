@@ -1,5 +1,6 @@
 import base64
 import json
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -9,6 +10,7 @@ from autonomous_data_api.evidence import (
     FormDFundingLeadsRequest,
     OfacExactRequest,
     OfacPreflightRequest,
+    PreparedResult,
     SecDeltaRequest,
     SecSignalRequest,
     SourceSnapshot,
@@ -576,3 +578,113 @@ def test_conversion_experiment_excludes_probes_and_owner_payments(
     )
     assert sec_signal["independent_paid_or_settlement_failures"] == 1
     assert sec_signal["independent_paid_fulfillment_rate_percent"] == 50.0
+
+
+def test_attempt_attribution_is_migrated_hashed_and_safely_aggregated(
+    tmp_path, monkeypatch
+):
+    db_path = tmp_path / "evidence.sqlite3"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE evidence_attempts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                request_id TEXT NOT NULL,
+                timestamp_utc TEXT NOT NULL,
+                route TEXT NOT NULL,
+                canonical_request_hash TEXT NOT NULL,
+                response_hash TEXT NOT NULL,
+                source_bundle_hash TEXT NOT NULL,
+                quoted_price TEXT NOT NULL,
+                network TEXT NOT NULL,
+                payment_identifier TEXT,
+                settlement_tx_hash TEXT,
+                payer_wallet_hmac TEXT,
+                owner_or_test_flag TEXT NOT NULL DEFAULT 'UNKNOWN',
+                response_status TEXT NOT NULL,
+                latency_ms INTEGER NOT NULL,
+                direct_cost_estimate REAL NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+
+    monkeypatch.setenv("AUTONOMOUS_X402_NETWORK", "eip155:8453")
+    evidence = service(tmp_path, monkeypatch)
+    columns = {
+        row["name"]
+        for row in evidence._connect()
+        .execute("PRAGMA table_info(evidence_attempts)")
+        .fetchall()
+    }
+    assert {
+        "client_hmac",
+        "user_agent_hmac",
+        "user_agent_family",
+        "discovery_source",
+        "agent_run_id_hmac",
+        "request_fingerprint_hmac",
+        "http_status",
+    }.issubset(columns)
+
+    prepared = PreparedResult(
+        request_id="attribution_fixture",
+        product="ofac_preflight",
+        request_hash="1" * 64,
+        source_bundle_hash="2" * 64,
+        result_hash="3" * 64,
+        result={},
+    )
+    evidence.record_attempt(
+        prepared,
+        route="/v1/ofac/payment-preflight",
+        quoted_price="$0.01",
+        network="eip155:8453",
+        response_status="FULFILLED",
+        latency_ms=123,
+        payer_wallet="0x1111111111111111111111111111111111111111",
+        client_identifier="203.0.113.42",
+        user_agent="Coinbase-CDP-Test/1.0",
+        user_agent_family="coinbase-cdp",
+        referrer_origin="https://api.cdp.coinbase.com",
+        edge_region="iad",
+        proxy_request_id="request-123-iad",
+        discovery_source="coinbase-bazaar",
+        agent_run_id="private-run-123",
+        http_status=200,
+    )
+
+    with evidence._connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM evidence_attempts WHERE request_id = ?",
+            (prepared.request_id,),
+        ).fetchone()
+    assert row["client_hmac"] != "203.0.113.42"
+    assert row["user_agent_hmac"] != "Coinbase-CDP-Test/1.0"
+    assert row["agent_run_id_hmac"] != "private-run-123"
+    assert len(row["client_hmac"]) == 64
+    assert len(row["user_agent_hmac"]) == 64
+    assert len(row["agent_run_id_hmac"]) == 64
+    assert len(row["request_fingerprint_hmac"]) == 64
+    assert row["user_agent_family"] == "coinbase-cdp"
+    assert row["referrer_origin"] == "https://api.cdp.coinbase.com"
+    assert row["discovery_source"] == "coinbase-bazaar"
+    assert row["http_status"] == 200
+
+    attribution = evidence.experiment_status()["attribution"]
+    assert attribution["client_fingerprinted_attempts"] == 1
+    assert attribution["fingerprinted_fulfilled_attempts"] == 1
+    assert attribution["user_agent_families"] == [
+        {
+            "user_agent_family": "coinbase-cdp",
+            "attempts": 1,
+            "fulfilled_attempts": 1,
+        }
+    ]
+    assert attribution["declared_discovery_sources"] == [
+        {
+            "discovery_source": "coinbase-bazaar",
+            "attempts": 1,
+            "fulfilled_attempts": 1,
+        }
+    ]

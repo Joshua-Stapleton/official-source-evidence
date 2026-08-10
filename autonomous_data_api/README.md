@@ -47,6 +47,13 @@ payment layer.
 
 Every attempt is written to a reconciliation ledger. Testnet and configured owner-wallet traffic are explicitly excluded from independent-demand interpretation.
 
+Agents may optionally send `X-Agent-Discovery-Source` (for example,
+`coinbase-bazaar`, `x402-list`, or `direct`) and `X-Agent-Run-Id`. Client IP,
+full User-Agent, and agent-run values are stored only as keyed HMACs. The ledger
+keeps only a broad User-Agent family and the origin portion of a valid referrer;
+it never stores a raw client IP or a referrer path/query. Attribution headers are
+self-declared evidence, not verified identity.
+
 ## Local Run
 
 ```bash
@@ -180,7 +187,7 @@ Production credentials are stored only as Fly secrets.
 - Canonical request, source-bundle, result, and component hashes.
 - Ed25519 result receipts.
 - Stored fulfilments and payment-proof replay.
-- Owner/test classification and HMAC wallet analytics.
+- Owner/test classification plus HMAC wallet, client, User-Agent, and run analytics.
 - Pre-payment Base-mainnet revenue cap, serialized on the single Fly machine.
 - `AUTONOMOUS_EVIDENCE_ENABLED=0` kill switch for new paid requests; replay remains available.
 

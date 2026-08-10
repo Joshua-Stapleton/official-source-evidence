@@ -506,6 +506,16 @@ class EvidenceService:
                     response_status TEXT NOT NULL,
                     latency_ms INTEGER NOT NULL,
                     direct_cost_estimate REAL NOT NULL DEFAULT 0,
+                    client_hmac TEXT,
+                    user_agent_hmac TEXT,
+                    user_agent_family TEXT,
+                    referrer_origin TEXT,
+                    edge_region TEXT,
+                    proxy_request_id TEXT,
+                    discovery_source TEXT,
+                    agent_run_id_hmac TEXT,
+                    request_fingerprint_hmac TEXT,
+                    http_status INTEGER,
                     created_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS fulfillments (
@@ -524,6 +534,35 @@ class EvidenceService:
                     created_at TEXT NOT NULL,
                     FOREIGN KEY (request_id) REFERENCES prepared_results(request_id)
                 );
+                """
+            )
+            existing_columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(evidence_attempts)"
+                ).fetchall()
+            }
+            attribution_columns = {
+                "client_hmac": "TEXT",
+                "user_agent_hmac": "TEXT",
+                "user_agent_family": "TEXT",
+                "referrer_origin": "TEXT",
+                "edge_region": "TEXT",
+                "proxy_request_id": "TEXT",
+                "discovery_source": "TEXT",
+                "agent_run_id_hmac": "TEXT",
+                "request_fingerprint_hmac": "TEXT",
+                "http_status": "INTEGER",
+            }
+            for column, column_type in attribution_columns.items():
+                if column not in existing_columns:
+                    connection.execute(
+                        f"ALTER TABLE evidence_attempts ADD COLUMN {column} {column_type}"
+                    )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_evidence_attempts_request_fingerprint
+                ON evidence_attempts(request_fingerprint_hmac, timestamp_utc)
                 """
             )
 
@@ -2193,6 +2232,15 @@ class EvidenceService:
         payment_signature: str | None = None,
         settlement_tx_hash: str | None = None,
         payer_wallet: str | None = None,
+        client_identifier: str | None = None,
+        user_agent: str | None = None,
+        user_agent_family: str | None = None,
+        referrer_origin: str | None = None,
+        edge_region: str | None = None,
+        proxy_request_id: str | None = None,
+        discovery_source: str | None = None,
+        agent_run_id: str | None = None,
+        http_status: int | None = None,
     ) -> None:
         payment_identifier = (
             sha256_bytes(payment_signature.encode("utf-8"))
@@ -2207,6 +2255,19 @@ class EvidenceService:
             ).hexdigest()
             if payer_wallet
             else None
+        )
+        client_hmac = self._analytics_hmac(client_identifier)
+        user_agent_hmac = self._analytics_hmac(user_agent)
+        agent_run_id_hmac = self._analytics_hmac(agent_run_id)
+        request_fingerprint_hmac = self._analytics_hmac(
+            "|".join(
+                (
+                    route,
+                    prepared.request_hash,
+                    client_hmac or "",
+                    user_agent_hmac or "",
+                )
+            )
         )
         owners = {
             item.strip().casefold()
@@ -2227,8 +2288,14 @@ class EvidenceService:
                     response_hash, source_bundle_hash, quoted_price, network,
                     payment_identifier, settlement_tx_hash, payer_wallet_hmac,
                     owner_or_test_flag, response_status, latency_ms,
-                    direct_cost_estimate, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+                    direct_cost_estimate, client_hmac, user_agent_hmac,
+                    user_agent_family, referrer_origin, edge_region,
+                    proxy_request_id, discovery_source, agent_run_id_hmac,
+                    request_fingerprint_hmac, http_status, created_at
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
                 """,
                 (
                     prepared.request_id,
@@ -2245,6 +2312,16 @@ class EvidenceService:
                     owner_or_test,
                     response_status,
                     latency_ms,
+                    client_hmac,
+                    user_agent_hmac,
+                    user_agent_family,
+                    referrer_origin,
+                    edge_region,
+                    proxy_request_id,
+                    discovery_source,
+                    agent_run_id_hmac,
+                    request_fingerprint_hmac,
+                    http_status,
                     utc_now(),
                 ),
             )
@@ -2263,6 +2340,15 @@ class EvidenceService:
                     ),
                 )
             connection.commit()
+
+    def _analytics_hmac(self, value: str | None) -> str | None:
+        if not value:
+            return None
+        return hmac.new(
+            self.analytics_hmac_key,
+            value.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
 
     def bind_payment(
         self,
@@ -2352,6 +2438,46 @@ class EvidenceService:
                 if cohort_start_utc
                 else []
             )
+            attribution_summary = connection.execute(
+                """
+                SELECT
+                    COUNT(*) AS attempts,
+                    COALESCE(SUM(CASE WHEN client_hmac IS NOT NULL THEN 1 ELSE 0 END), 0)
+                        AS client_fingerprinted_attempts,
+                    COALESCE(SUM(CASE WHEN user_agent_hmac IS NOT NULL THEN 1 ELSE 0 END), 0)
+                        AS user_agent_fingerprinted_attempts,
+                    COALESCE(SUM(CASE WHEN discovery_source IS NOT NULL THEN 1 ELSE 0 END), 0)
+                        AS declared_source_attempts,
+                    COALESCE(SUM(CASE WHEN response_status = 'FULFILLED'
+                                          AND client_hmac IS NOT NULL
+                                     THEN 1 ELSE 0 END), 0)
+                        AS fingerprinted_fulfilled_attempts
+                FROM evidence_attempts
+                """
+            ).fetchone()
+            user_agent_rows = connection.execute(
+                """
+                SELECT user_agent_family, COUNT(*) AS attempts,
+                       SUM(CASE WHEN response_status = 'FULFILLED' THEN 1 ELSE 0 END)
+                           AS fulfilled_attempts
+                FROM evidence_attempts
+                WHERE user_agent_family IS NOT NULL
+                GROUP BY user_agent_family
+                ORDER BY attempts DESC, user_agent_family
+                """
+            ).fetchall()
+            discovery_rows = connection.execute(
+                """
+                SELECT discovery_source, COUNT(*) AS attempts,
+                       SUM(CASE WHEN response_status = 'FULFILLED' THEN 1 ELSE 0 END)
+                           AS fulfilled_attempts
+                FROM evidence_attempts
+                WHERE discovery_source IS NOT NULL
+                GROUP BY discovery_source
+                ORDER BY attempts DESC, discovery_source
+                LIMIT 20
+                """
+            ).fetchall()
         status = {
             "generated_at": utc_now(),
             "metrics": [dict(row) for row in rows],
@@ -2360,6 +2486,16 @@ class EvidenceService:
                 "Testnet, owner, and unverified clusters are reported separately and do not "
                 "establish independent demand."
             ),
+            "attribution": {
+                **dict(attribution_summary),
+                "user_agent_families": [dict(row) for row in user_agent_rows],
+                "declared_discovery_sources": [dict(row) for row in discovery_rows],
+                "measurement_notes": [
+                    "Client, user-agent, and agent-run identifiers are stored only as keyed HMACs.",
+                    "Discovery source is optional and self-declared; absence does not imply direct traffic.",
+                    "Attempts recorded before attribution deployment remain unclassified.",
+                ],
+            },
         }
         if not cohort_start_utc:
             return status
