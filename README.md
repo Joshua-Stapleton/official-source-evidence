@@ -10,6 +10,9 @@ evidence for autonomous agents. No account, API key, or sales call.
 
 The Source Watch demand hypothesis, attribution rules, and stop/scale gates are
 pre-registered in [SOURCE_WATCH_EXPERIMENT.md](autonomous_data_api/SOURCE_WATCH_EXPERIMENT.md).
+The first independent buyer's on-chain cohort, interpretation, and resulting
+actions are recorded in
+[INDEPENDENT_BUYER_ANALYSIS.md](autonomous_data_api/INDEPENDENT_BUYER_ANALYSIS.md).
 
 ## Agent-Payable Products
 
