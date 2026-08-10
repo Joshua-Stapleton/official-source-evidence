@@ -23,6 +23,16 @@ EXPECTED_PAY_TO = "0x9500075649a70411c81f99c4314f6cff55d12579"
 EXPECTED_BUYER = "0x5Bd70c14C517dffC1bB3361274093A791306Ccdd"
 EXPECTED_ASSET = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 PRODUCTS = {
+    "source_snapshot": {
+        "endpoint": "https://evidence.regulavita.com/v1/web/source-snapshot",
+        "amount_atomic": "30000",
+        "arm_value": "0.03",
+        "payload": {
+            "url": "https://example.com",
+            "query": "example domain",
+            "max_characters": 12000,
+        },
+    },
     "form_d": {
         "endpoint": ("https://evidence.regulavita.com/v1/gtm/form-d-funding-leads"),
         "amount_atomic": "50000",
