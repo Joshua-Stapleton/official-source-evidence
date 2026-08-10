@@ -84,3 +84,9 @@ The portfolio continues to use these global scale gates:
 
 Until those gates move, the scientifically correct result is: autonomous
 distribution and payment are validated; repeat commercial demand is not.
+
+## Detailed Artifacts
+
+- [First-customer forensic](research/first-customer-forensic-2026-08-10.md)
+- [Buyer portfolio and expected-value analysis](research/buyer-portfolio-ev-analysis-2026-08-10.md)
+- [Probabilistic purchase map](research/first-buyer-purchase-map-2026-08-10.csv)
