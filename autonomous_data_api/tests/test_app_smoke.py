@@ -31,6 +31,7 @@ from autonomous_data_api.app import (
     app,
     evidence_service,
     load_cdp_api_key_secret,
+    payment_failure_diagnostics,
 )
 from autonomous_data_api.evidence import PreparedResult, SourceStaleError
 
@@ -92,6 +93,58 @@ def decode_challenge(response):
     encoded = response.headers["payment-required"]
     encoded += "=" * (-len(encoded) % 4)
     return json.loads(base64.urlsafe_b64decode(encoded))
+
+
+def encoded_header(payload):
+    return base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+
+
+def test_payment_failure_diagnostics_distinguishes_verification_and_settlement():
+    verification = JSONResponse(
+        content={},
+        status_code=402,
+        headers={
+            "payment-required": encoded_header(
+                {"error": "invalid_exact_evm_payload_authorization_valid_before"}
+            )
+        },
+    )
+    settlement = JSONResponse(
+        content={},
+        status_code=402,
+        headers={
+            "payment-response": encoded_header(
+                {"errorReason": "settle_exact_node_failure"}
+            )
+        },
+    )
+
+    assert payment_failure_diagnostics(verification, "signed") == (
+        "verification",
+        "invalid_exact_evm_payload_authorization_valid_before",
+    )
+    assert payment_failure_diagnostics(settlement, "signed") == (
+        "settlement",
+        "settle_exact_node_failure",
+    )
+    assert payment_failure_diagnostics(verification, None) == (None, None)
+
+
+def test_payment_failure_diagnostics_does_not_persist_unknown_error_text():
+    response = JSONResponse(
+        content={},
+        status_code=402,
+        headers={
+            "payment-required": encoded_header(
+                {"error": "private upstream detail customer@example.com"}
+            )
+        },
+    )
+
+    assert payment_failure_diagnostics(response, "signed") == (
+        "verification",
+        "unclassified",
+    )
 
 
 def test_cdp_secret_can_be_loaded_from_base64(monkeypatch):
@@ -402,6 +455,8 @@ def test_payment_attempt_captures_privacy_safe_agent_attribution(
         "discovery_source": "coinbase-bazaar",
         "agent_run_id": "private-run-123",
         "http_status": 402,
+        "payment_failure_stage": None,
+        "payment_failure_reason": None,
     }
     assert captured["latency_ms"] >= 0
 

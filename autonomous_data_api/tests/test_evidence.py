@@ -696,6 +696,8 @@ def test_attempt_attribution_is_migrated_hashed_and_safely_aggregated(
         "agent_run_id_hmac",
         "request_fingerprint_hmac",
         "http_status",
+        "payment_failure_stage",
+        "payment_failure_reason",
     }.issubset(columns)
 
     prepared = PreparedResult(

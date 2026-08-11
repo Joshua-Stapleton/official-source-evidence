@@ -564,6 +564,8 @@ class EvidenceService:
                     agent_run_id_hmac TEXT,
                     request_fingerprint_hmac TEXT,
                     http_status INTEGER,
+                    payment_failure_stage TEXT,
+                    payment_failure_reason TEXT,
                     created_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS fulfillments (
@@ -601,6 +603,8 @@ class EvidenceService:
                 "agent_run_id_hmac": "TEXT",
                 "request_fingerprint_hmac": "TEXT",
                 "http_status": "INTEGER",
+                "payment_failure_stage": "TEXT",
+                "payment_failure_reason": "TEXT",
             }
             for column, column_type in attribution_columns.items():
                 if column not in existing_columns:
@@ -2405,6 +2409,8 @@ class EvidenceService:
         discovery_source: str | None = None,
         agent_run_id: str | None = None,
         http_status: int | None = None,
+        payment_failure_stage: str | None = None,
+        payment_failure_reason: str | None = None,
     ) -> None:
         payment_identifier = (
             sha256_bytes(payment_signature.encode("utf-8"))
@@ -2455,10 +2461,11 @@ class EvidenceService:
                     direct_cost_estimate, client_hmac, user_agent_hmac,
                     user_agent_family, referrer_origin, edge_region,
                     proxy_request_id, discovery_source, agent_run_id_hmac,
-                    request_fingerprint_hmac, http_status, created_at
+                    request_fingerprint_hmac, http_status,
+                    payment_failure_stage, payment_failure_reason, created_at
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -2486,6 +2493,8 @@ class EvidenceService:
                     agent_run_id_hmac,
                     request_fingerprint_hmac,
                     http_status,
+                    payment_failure_stage,
+                    payment_failure_reason,
                     utc_now(),
                 ),
             )
@@ -2642,10 +2651,24 @@ class EvidenceService:
                 LIMIT 20
                 """
             ).fetchall()
+            failure_rows = connection.execute(
+                """
+                SELECT route, network, owner_or_test_flag,
+                       COALESCE(payment_failure_stage, 'unknown') AS stage,
+                       COALESCE(payment_failure_reason, 'unclassified') AS reason,
+                       COUNT(*) AS attempts,
+                       MAX(timestamp_utc) AS last_seen_at
+                FROM evidence_attempts
+                WHERE response_status = 'PAYMENT_OR_SETTLEMENT_FAILED'
+                GROUP BY route, network, owner_or_test_flag, stage, reason
+                ORDER BY last_seen_at DESC
+                """
+            ).fetchall()
         status = {
             "generated_at": utc_now(),
             "metrics": [dict(row) for row in rows],
             "sources": [dict(row) for row in sources],
+            "payment_failure_diagnostics": [dict(row) for row in failure_rows],
             "interpretation": (
                 "Testnet, owner, and unverified clusters are reported separately and do not "
                 "establish independent demand."

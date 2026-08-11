@@ -6,6 +6,7 @@ import binascii
 import hashlib
 import ipaddress
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -59,6 +60,8 @@ from autonomous_data_api.evidence import (
 )
 from autonomous_data_api.marketplace import MarketplaceError, The402Provider
 from autonomous_data_api.monitors import MonitorError, WebMonitorService
+
+logger = logging.getLogger(__name__)
 
 X402_TEST_RECIPIENT = "0x000000000000000000000000000000000000dEaD"
 X402_NETWORK: Network = os.getenv("AUTONOMOUS_X402_NETWORK", "eip155:84532")
@@ -1066,6 +1069,60 @@ def normalized_header_token(value: str | None, max_length: int) -> str | None:
     return normalized
 
 
+PAYMENT_FAILURE_REASON_CODES = {
+    "insufficient_funds",
+    "invalid_scheme",
+    "invalid_network",
+    "invalid_x402_version",
+    "invalid_payment_requirements",
+    "invalid_payload",
+    "invalid_exact_evm_payload_authorization_value",
+    "invalid_exact_evm_payload_authorization_value_too_low",
+    "invalid_exact_evm_payload_authorization_valid_after",
+    "invalid_exact_evm_payload_authorization_valid_before",
+    "invalid_exact_evm_payload_authorization_typed_data_message",
+    "invalid_exact_evm_payload_authorization_from_address_kyt",
+    "invalid_exact_evm_payload_authorization_to_address_kyt",
+    "invalid_exact_evm_payload_signature",
+    "invalid_exact_evm_payload_signature_address",
+    "invalid_exact_evm_permit2_payload_allowance_required",
+    "invalid_exact_evm_permit2_payload_signature",
+    "invalid_exact_evm_permit2_payload_deadline",
+    "no_matching_payment_requirements",
+    "settle_exact_failed_onchain",
+    "settle_exact_node_failure",
+    "settle_exact_evm_transaction_confirmation_timed_out",
+    "unexpected_settle_error",
+}
+
+
+def payment_failure_reason_code(value: Any) -> str:
+    if not isinstance(value, str) or not value.strip():
+        return "unclassified"
+    normalized = re.sub(r"[^a-z0-9]+", "_", value.casefold()).strip("_")
+    if normalized in PAYMENT_FAILURE_REASON_CODES:
+        return normalized
+    if normalized.startswith("extension_"):
+        return "extension_validation_failed"
+    return "unclassified"
+
+
+def payment_failure_diagnostics(
+    response: Response, payment_signature: str | None
+) -> tuple[str | None, str | None]:
+    if response.status_code != 402 or not payment_signature:
+        return None, None
+
+    settlement = decode_x402_json_header(response.headers.get("payment-response"))
+    if settlement:
+        reason = settlement.get("errorReason") or settlement.get("error_reason")
+        return "settlement", payment_failure_reason_code(reason)
+
+    payment_required = decode_x402_json_header(response.headers.get("payment-required"))
+    reason = payment_required.get("error") if payment_required else None
+    return "verification", payment_failure_reason_code(reason)
+
+
 def referrer_origin(value: str | None) -> str | None:
     if not value or len(value) > 2048:
         return None
@@ -1288,6 +1345,9 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
             "transactionHash"
         )
         payer_wallet = find_wallet(payment_payload)
+        payment_failure_stage, payment_failure_reason = payment_failure_diagnostics(
+            response, payment_signature
+        )
         if response.status_code == 402 and not payment_signature:
             response_status = "PAYMENT_REQUIRED"
         elif response.status_code < 400 and payment_signature:
@@ -1296,6 +1356,21 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
             response_status = "PAYMENT_OR_SETTLEMENT_FAILED"
         else:
             response_status = f"HTTP_{response.status_code}"
+        if payment_failure_stage:
+            response.headers["X-Evidence-Payment-Failure-Stage"] = payment_failure_stage
+            response.headers["X-Evidence-Payment-Failure-Reason"] = (
+                payment_failure_reason or "unclassified"
+            )
+            logger.warning(
+                "x402 payment failure request_id=%s route=%s stage=%s reason=%s "
+                "edge_region=%s proxy_request_id=%s",
+                prepared.request_id,
+                request.url.path,
+                payment_failure_stage,
+                payment_failure_reason or "unclassified",
+                normalized_header_token(request.headers.get("fly-region"), 16),
+                normalized_header_token(request.headers.get("fly-request-id"), 128),
+            )
         try:
             client_identifier = request_client_identifier(request)
             raw_user_agent = request.headers.get("user-agent")
@@ -1325,6 +1400,8 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
                 ),
                 agent_run_id=request.headers.get("x-agent-run-id"),
                 http_status=response.status_code,
+                payment_failure_stage=payment_failure_stage,
+                payment_failure_reason=payment_failure_reason,
             )
         except (sqlite3.Error, OSError):
             # A ledger outage must be visible in monitoring, but must not corrupt a valid receipt.
