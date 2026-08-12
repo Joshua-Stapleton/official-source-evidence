@@ -52,6 +52,16 @@ PRODUCTS = {
             "max_source_age_seconds": 600,
         },
     },
+    "dossier": {
+        "endpoint": ("https://evidence.regulavita.com/v1/gtm/form-d-company-dossier"),
+        "amount_atomic": "250000",
+        "arm_value": "0.25",
+        "payload": {
+            "cik": "0002149912",
+            "accession": "0002149912-26-000001",
+            "max_source_age_seconds": 600,
+        },
+    },
     "ofac": {
         "endpoint": (
             "https://evidence.regulavita.com/v1/ofac/exact-identifier-evidence"
@@ -221,6 +231,11 @@ async def main() -> None:
                 "buyer": account.address,
                 "request_id": result.get("request_id"),
                 "decision": result.get("decision"),
+                "issuer": result.get("issuer"),
+                "web_source_count": result.get("web_research", {}).get("source_count"),
+                "supplier_settlement_transaction": result.get("provenance", {}).get(
+                    "supplier_settlement_transaction"
+                ),
                 "lead_count": result.get("lead_count"),
                 "match_status": result.get("match_status"),
                 "result_sha256": result.get("provenance", {}).get("result_sha256"),
