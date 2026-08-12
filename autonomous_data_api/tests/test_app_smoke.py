@@ -32,6 +32,7 @@ from autonomous_data_api.app import (
     evidence_service,
     load_cdp_api_key_secret,
     payment_failure_diagnostics,
+    payment_failure_reason_code,
 )
 from autonomous_data_api.evidence import PreparedResult, SourceStaleError
 
@@ -128,6 +129,19 @@ def test_payment_failure_diagnostics_distinguishes_verification_and_settlement()
         "settle_exact_node_failure",
     )
     assert payment_failure_diagnostics(verification, None) == (None, None)
+
+
+def test_payment_failure_reason_preserves_safe_coinbase_evm_enums_only():
+    assert payment_failure_reason_code("invalid_exact_evm_insufficient_funds") == (
+        "invalid_exact_evm_insufficient_funds"
+    )
+    assert payment_failure_reason_code("permit2_insufficient_balance") == (
+        "permit2_insufficient_balance"
+    )
+    assert payment_failure_reason_code("wallet 0x123 private detail") == "unclassified"
+    assert payment_failure_reason_code("invalid_exact_evm_" + "x" * 200) == (
+        "unclassified"
+    )
 
 
 def test_payment_failure_diagnostics_does_not_persist_unknown_error_text():

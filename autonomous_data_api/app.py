@@ -1210,13 +1210,27 @@ PAYMENT_FAILURE_REASON_CODES = {
     "settle_exact_evm_transaction_confirmation_timed_out",
     "unexpected_settle_error",
 }
+PAYMENT_FAILURE_REASON_PREFIXES = (
+    "invalid_exact_evm_",
+    "invalid_permit2_",
+    "permit2_",
+    "invalid_erc20_",
+    "erc20_approval_",
+    "invalid_batch_settlement_evm_",
+    "batch_settlement_",
+)
 
 
 def payment_failure_reason_code(value: Any) -> str:
     if not isinstance(value, str) or not value.strip():
         return "unclassified"
-    normalized = re.sub(r"[^a-z0-9]+", "_", value.casefold()).strip("_")
+    raw = value.strip()
+    if len(raw) > 128 or not re.fullmatch(r"[a-z][a-z0-9_]*", raw):
+        return "unclassified"
+    normalized = raw.casefold()
     if normalized in PAYMENT_FAILURE_REASON_CODES:
+        return normalized
+    if normalized.startswith(PAYMENT_FAILURE_REASON_PREFIXES):
         return normalized
     if normalized.startswith("extension_"):
         return "extension_validation_failed"
