@@ -10,6 +10,8 @@ Paid candidates:
 - `POST /v1/web/source-snapshot` at `$0.03` USDC per fulfilled call.
 - `POST /v1/monitors/source-change` at `$1.00` USDC per 30-day monitor.
 - `POST /v1/gtm/form-d-funding-leads` at `$0.05` USDC per fulfilled call.
+- Dormant until explicitly activated: `POST /v1/gtm/form-d-company-dossier` at
+  `$0.25` USDC, with a maximum `$0.01` paid-search input per fulfilled call.
 - `POST /v1/ofac/payment-preflight` at `$0.01` USDC per fulfilled call.
 - `POST /v1/sec/filing-change-signal` at `$0.01` USDC per fulfilled call.
 - `POST /v1/sec/filing-trigger-delta` at `$0.10` USDC per fulfilled call.
@@ -34,6 +36,14 @@ offering, not proof that the total offering amount was raised. The route does no
 infer funding, recommend securities, enrich personal contact details, or perform
 outreach.
 
+The funded-company dossier experiment composes one official Form D filing with
+fresh web research purchased over x402. It is registered and advertised only on
+Base mainnet when its dedicated supplier wallet and explicit enable flag are
+both configured. Customer payment is verified before the supplier call, the
+supplier selector rejects any non-USDC, non-Base, or above-$0.01 quote, and an
+atomic UTC-day cap plus inbound-payment replay key bounds spend. Revenue, direct
+supplier cost, and gross margin are recorded separately.
+
 The SEC signal accepts a ticker and timestamp and returns a compact filing-change decision. The premium SEC endpoint also accepts CIK and accession inputs, and adds document hashes, selected XBRL fact deltas, source freshness, provenance, and a signed receipt. Neither returns ratings, materiality opinions, valuation, trading advice, or execution instructions.
 
 The OFAC preflight returns a compact decision for an exact EVM address. The premium endpoint adds full matching records, source hashes, and a signed receipt for an address, OFAC UID, or exact name. Neither returns `safe`, `approved`, `cleared`, `not sanctioned`, `compliant`, or `legal to transact`; they do no fuzzy matching, ownership/control analysis, or transaction authorization.
@@ -47,6 +57,12 @@ The OFAC preflight returns a compact decision for an exact EVM address. The prem
 5. A compatible buyer pays and retries automatically.
 6. The already prepared result is returned. Premium evidence routes include an Ed25519 receipt and source hashes.
 7. A fulfilled buyer can replay the stored result with the original `Payment-Signature` at `/v1/evidence/replay/{request_id}` without a second charge.
+
+The composed dossier uses a separate payment-first path: x402 verifies the
+customer authorization, the handler makes at most one capped supplier purchase,
+and only a successful dossier response is settled. If assembly fails, the
+customer is not charged; any uncertain supplier spend remains counted against
+the daily supplier cap.
 
 For directory and uptime monitoring, an empty unauthenticated `POST` is a
 supported probe for all paid routes. It uses the route's published Bazaar
@@ -148,6 +164,16 @@ export AUTONOMOUS_X402_FACILITATOR_URL=https://api.cdp.coinbase.com/platform/v2/
 export CDP_API_KEY_ID=organizations/.../apiKeys/...
 export CDP_API_KEY_SECRET='-----BEGIN EC PRIVATE KEY-----...'
 export AUTONOMOUS_OWNER_WALLETS=0xOwnerWallet,0xBootstrapWallet
+```
+
+To activate the composed dossier after its spend budget is approved, use a
+dedicated low-balance supplier wallet and a small UTC-day cap:
+
+```bash
+export AUTONOMOUS_GTM_DOSSIER_ENABLED=1
+export AUTONOMOUS_X402_FORM_D_DOSSIER_PRICE='$0.25'
+export AUTONOMOUS_GTM_DOSSIER_SUPPLIER_DAILY_CAP_USD='0.05'
+export AUTONOMOUS_SUPPLIER_WALLET_PRIVATE_KEY='0xDedicatedSupplierWalletKey'
 ```
 
 The seller app never needs the receiving wallet's private key. The CDP secret authenticates facilitator verify/settle calls; it is not a treasury key.

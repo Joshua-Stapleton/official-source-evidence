@@ -8,6 +8,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from autonomous_data_api.evidence import (
     EvidenceService,
+    FormDCompanyDossierRequest,
+    FormDDossierSource,
     FormDFundingLeadsRequest,
     OfacExactRequest,
     OfacPreflightRequest,
@@ -518,6 +520,75 @@ def test_form_d_funding_leads_filters_paginates_and_preserves_source_basis(
     assert second.result["pagination"]["next_cursor"] is None
 
 
+def test_form_d_company_dossier_is_source_hashed_and_signed(tmp_path, monkeypatch):
+    evidence = service(tmp_path, monkeypatch)
+    cik = "0001050743"
+    accession = "0001050743-26-000002"
+    content = f"""<SEC-DOCUMENT>{accession}.txt
+<SEC-HEADER><ACCEPTANCE-DATETIME>20260810120000</SEC-HEADER>
+<DOCUMENT><TYPE>D<FILENAME>primary_doc.xml<TEXT><XML>
+<edgarSubmission><submissionType>D</submissionType>
+  <primaryIssuer><cik>{cik}</cik><entityName>Example One</entityName>
+    <issuerAddress><city>Bedminster</city><stateOrCountry>NJ</stateOrCountry></issuerAddress>
+  </primaryIssuer>
+  <relatedPersonsList><relatedPersonInfo><relatedPersonName><firstName>Alex</firstName><lastName>Example</lastName></relatedPersonName></relatedPersonInfo></relatedPersonsList>
+  <offeringData><industryGroup><industryGroupType>Commercial Banking</industryGroupType></industryGroup>
+    <offeringSalesAmounts><totalOfferingAmount>10000000</totalOfferingAmount><totalAmountSold>5000000</totalAmountSold></offeringSalesAmounts>
+  </offeringData>
+</edgarSubmission></XML></TEXT></DOCUMENT></SEC-DOCUMENT>""".encode()
+    request = FormDCompanyDossierRequest(cik=cik, accession=accession)
+    snapshot = make_snapshot("sec:form-d-submission:test", content)
+    source = FormDDossierSource(
+        lead=evidence._parse_form_d_submission(
+            content,
+            {
+                "accession": accession,
+                "cik": cik,
+                "form": "D",
+                "filed_date": "20260810",
+                "company_name": "Example One",
+            },
+            f"https://www.sec.gov/Archives/edgar/data/1050743/{accession}.txt",
+        ),
+        snapshot=snapshot,
+        filing_url=f"https://www.sec.gov/Archives/edgar/data/1050743/{accession}.txt",
+    )
+
+    prepared = evidence.prepare_form_d_company_dossier(
+        request,
+        source,
+        {
+            "query": '"Example One" official website products customers company',
+            "request_id": "supplier-request",
+            "results": [
+                {
+                    "title": "Example One",
+                    "url": "https://example.com/company",
+                    "content": "Example One builds payment software.",
+                    "score": 0.91,
+                },
+                {"title": "Unsafe", "url": "http://unsafe.example", "content": "x"},
+            ],
+        },
+        "0xsupplier",
+    )
+
+    assert prepared.product == "form_d_company_dossier"
+    assert prepared.result["decision"] == "FORM_D_COMPANY_DOSSIER_READY"
+    assert prepared.result["issuer"]["name"] == "Example One"
+    assert prepared.result["funding_signal"]["amount_sold_usd"] == "5000000"
+    assert prepared.result["web_research"]["source_count"] == 1
+    assert prepared.result["provenance"]["supplier_settlement_transaction"] == (
+        "0xsupplier"
+    )
+    assert prepared.result["receipt"]["algorithm"] == "Ed25519"
+
+
+def test_form_d_company_dossier_accession_must_match_cik():
+    with pytest.raises(ValueError, match="accession must belong"):
+        FormDCompanyDossierRequest(cik="1050743", accession="0000000001-26-000001")
+
+
 def test_conversion_experiment_excludes_probes_and_owner_payments(
     tmp_path, monkeypatch
 ):
@@ -616,6 +687,8 @@ def test_conversion_experiment_excludes_probes_and_owner_payments(
     assert experiment["repeat_independent_buyer_clusters"] == 1
     assert experiment["independent_fulfilled_calls"] == 4
     assert experiment["independent_revenue_usd"] == "1.03"
+    assert experiment["independent_direct_cost_usd"] == "0.00"
+    assert experiment["independent_gross_margin_usd"] == "1.03"
     assert experiment["independent_paid_fulfillment_rate_percent"] == 80.0
     assert experiment["max_independent_buyer_call_share"] == 0.5
     assert experiment["gates"]["no_buyer_above_50_percent_of_calls"] is True

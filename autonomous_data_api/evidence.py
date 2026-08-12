@@ -48,6 +48,7 @@ OFAC_SOURCE_URLS = {
 }
 SEC_PARSER_VERSION = "sec-trigger-delta/0.2.0"
 FORM_D_PARSER_VERSION = "sec-form-d-funding-leads/0.1.0"
+FORM_D_DOSSIER_PARSER_VERSION = "sec-form-d-company-dossier/0.1.0"
 OFAC_PARSER_VERSION = "ofac-exact/0.2.0"
 OFAC_FRESHNESS_SECONDS = 900
 MAX_SEC_FILINGS = 10
@@ -282,6 +283,28 @@ class FormDFundingLeadsRequest(BaseModel):
         return cleaned
 
 
+class FormDCompanyDossierRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    cik: str = Field(pattern=r"^\d{1,10}$")
+    accession: str = Field(pattern=r"^\d{10}-\d{2}-\d{6}$")
+    max_source_age_seconds: int = Field(default=600, ge=60, le=3600)
+
+    @field_validator("cik", mode="before")
+    @classmethod
+    def normalize_cik(cls, value: Any) -> str:
+        text = str(value).strip()
+        if not text.isdigit() or len(text) > 10:
+            raise ValueError("cik must contain 1-10 digits")
+        return text.zfill(10)
+
+    @model_validator(mode="after")
+    def accession_matches_cik(self) -> FormDCompanyDossierRequest:
+        if not self.accession.startswith(f"{self.cik}-"):
+            raise ValueError("accession must belong to the supplied CIK")
+        return self
+
+
 class WebMonitorCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -451,6 +474,13 @@ class PreparedResult:
     source_bundle_hash: str
     result_hash: str
     result: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class FormDDossierSource:
+    lead: dict[str, Any]
+    snapshot: SourceSnapshot
+    filing_url: str
 
 
 def _xml_text(element: Any, name: str) -> str | None:
@@ -1797,6 +1827,112 @@ class EvidenceService:
             result_core,
         )
 
+    def load_form_d_dossier_source(
+        self, request: FormDCompanyDossierRequest
+    ) -> FormDDossierSource:
+        filing_url = f"{SEC_ARCHIVES_ROOT}/{int(request.cik)}/{request.accession}.txt"
+        snapshot = self._fetch_sec_source(
+            f"sec:form-d-submission:{request.accession}",
+            filing_url,
+            request.max_source_age_seconds,
+        )
+        lead = self._parse_form_d_submission(
+            snapshot.content,
+            {
+                "accession": request.accession,
+                "cik": request.cik,
+                "form": "D",
+                "filed_date": datetime.now(timezone.utc).strftime("%Y%m%d"),
+                "company_name": "",
+            },
+            filing_url,
+        )
+        return FormDDossierSource(lead=lead, snapshot=snapshot, filing_url=filing_url)
+
+    def prepare_form_d_company_dossier(
+        self,
+        request: FormDCompanyDossierRequest,
+        source: FormDDossierSource,
+        search_payload: dict[str, Any],
+        supplier_transaction: str | None,
+    ) -> PreparedResult:
+        request_payload = request.model_dump(mode="json")
+        request_hash = sha256_json(request_payload)
+        search_response_hash = sha256_json(search_payload)
+        source_bundle_hash = sha256_json(
+            {
+                "parser_version": FORM_D_DOSSIER_PARSER_VERSION,
+                "official_source_sha256": source.snapshot.content_sha256,
+                "search_response_sha256": search_response_hash,
+            }
+        )
+        cached = self._cached_prepared(
+            "form_d_company_dossier", request_hash, source_bundle_hash
+        )
+        if cached:
+            return cached
+
+        web_sources: list[dict[str, Any]] = []
+        raw_results = search_payload.get("results")
+        if isinstance(raw_results, list):
+            for item in raw_results[:5]:
+                if not isinstance(item, dict):
+                    continue
+                url = str(item.get("url") or "").strip()
+                parsed = urlparse(url)
+                if parsed.scheme != "https" or not parsed.hostname:
+                    continue
+                score = item.get("score")
+                web_sources.append(
+                    {
+                        "title": str(item.get("title") or "")[:300],
+                        "url": url[:2048],
+                        "snippet": str(item.get("content") or "")[:2000],
+                        "score": score if isinstance(score, (int, float)) else None,
+                    }
+                )
+
+        lead = source.lead
+        issuer = lead["issuer"]
+        result_core = {
+            "decision": "FORM_D_COMPANY_DOSSIER_READY",
+            "issuer": issuer,
+            "funding_signal": lead["funding_signal"],
+            "industry": lead.get("industry"),
+            "related_people": lead.get("related_people", []),
+            "web_research": {
+                "query": str(search_payload.get("query") or "")[:1000],
+                "sources": web_sources,
+                "source_count": len(web_sources),
+                "supplier": "Tavily Search advanced",
+                "supplier_request_id": str(search_payload.get("request_id") or "")[:200]
+                or None,
+                "retrieved_at": utc_now(),
+            },
+            "official_source_urls": lead["official_source_urls"],
+            "provenance": {
+                "publisher": "U.S. Securities and Exchange Commission",
+                "official_source_sha256": f"sha256:{source.snapshot.content_sha256}",
+                "official_source_retrieved_at": source.snapshot.retrieved_at,
+                "search_response_sha256": f"sha256:{search_response_hash}",
+                "supplier_settlement_transaction": supplier_transaction,
+                "parser_version": FORM_D_DOSSIER_PARSER_VERSION,
+                "result_sha256": None,
+            },
+            "limitations": [
+                "Form D is an issuer-filed notice, not proof that the total offering amount was raised.",
+                "Web-search results are third-party discovery context and are not official SEC records.",
+                "The signed receipt attests to the returned bytes and source hashes, not the truth of third-party claims.",
+                "This is factual GTM research, not investment, legal, or solicitation advice.",
+            ],
+        }
+        return self._store_prepared(
+            "form_d_company_dossier",
+            request_hash,
+            source_bundle_hash,
+            result_core,
+        )
+
     def prepare_web_monitor(self, request: WebMonitorCreateRequest) -> PreparedResult:
         request_payload = request.model_dump(mode="json")
         request_hash = sha256_json(request_payload)
@@ -2397,6 +2533,7 @@ class EvidenceService:
         network: str,
         response_status: str,
         latency_ms: int,
+        direct_cost_estimate: Decimal = Decimal(0),
         payment_signature: str | None = None,
         settlement_tx_hash: str | None = None,
         payer_wallet: str | None = None,
@@ -2464,7 +2601,7 @@ class EvidenceService:
                     request_fingerprint_hmac, http_status,
                     payment_failure_stage, payment_failure_reason, created_at
                 ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
@@ -2483,6 +2620,7 @@ class EvidenceService:
                     owner_or_test,
                     response_status,
                     latency_ms,
+                    float(direct_cost_estimate),
                     client_hmac,
                     user_agent_hmac,
                     user_agent_family,
@@ -2601,7 +2739,7 @@ class EvidenceService:
                 connection.execute(
                     """
                     SELECT route, timestamp_utc, quoted_price, payer_wallet_hmac,
-                           owner_or_test_flag, response_status
+                           owner_or_test_flag, response_status, direct_cost_estimate
                     FROM evidence_attempts
                     WHERE timestamp_utc >= ?
                     ORDER BY timestamp_utc
@@ -2664,11 +2802,21 @@ class EvidenceService:
                 ORDER BY last_seen_at DESC
                 """
             ).fetchall()
+            direct_cost_rows = connection.execute(
+                """
+                SELECT owner_or_test_flag, response_status,
+                       COALESCE(SUM(direct_cost_estimate), 0) AS direct_cost_usd
+                FROM evidence_attempts
+                GROUP BY owner_or_test_flag, response_status
+                ORDER BY owner_or_test_flag, response_status
+                """
+            ).fetchall()
         status = {
             "generated_at": utc_now(),
             "metrics": [dict(row) for row in rows],
             "sources": [dict(row) for row in sources],
             "payment_failure_diagnostics": [dict(row) for row in failure_rows],
+            "direct_costs": [dict(row) for row in direct_cost_rows],
             "interpretation": (
                 "Testnet, owner, and unverified clusters are reported separately and do not "
                 "establish independent demand."
@@ -2713,6 +2861,14 @@ class EvidenceService:
                     "identify newly finance-active private companies and people."
                 ),
             },
+            "/v1/gtm/form-d-company-dossier": {
+                "tier": "composed-gtm-dossier",
+                "price_usd": "0.25",
+                "hypothesis": (
+                    "Agents will pay a material premium for one-call SEC filing facts, "
+                    "fresh company web research, source provenance, and a signed receipt."
+                ),
+            },
             "/v1/ofac/payment-preflight": {
                 "tier": "decision",
                 "price_usd": "0.01",
@@ -2738,6 +2894,8 @@ class EvidenceService:
         payer_days: dict[str, set[str]] = {}
         payer_calls: dict[str, int] = {}
         independent_revenue = Decimal(0)
+        independent_direct_cost = Decimal(0)
+        owner_direct_cost = Decimal(0)
         independent_paid_attempts = 0
         independent_fulfilled = 0
 
@@ -2751,6 +2909,10 @@ class EvidenceService:
                 "independent_buyer_clusters": 0,
                 "repeat_independent_buyer_clusters": 0,
                 "independent_revenue_usd": "0.00",
+                "direct_cost_usd": "0.00",
+                "independent_direct_cost_usd": "0.00",
+                "owner_direct_cost_usd": "0.00",
+                "independent_gross_margin_usd": "0.00",
                 "independent_paid_or_settlement_failures": 0,
                 "independent_paid_fulfillment_rate_percent": None,
             }
@@ -2760,6 +2922,13 @@ class EvidenceService:
             route: {} for route in funnels
         }
         route_independent_revenue: dict[str, Decimal] = {
+            route: Decimal(0) for route in funnels
+        }
+        route_direct_cost: dict[str, Decimal] = {route: Decimal(0) for route in funnels}
+        route_independent_direct_cost: dict[str, Decimal] = {
+            route: Decimal(0) for route in funnels
+        }
+        route_owner_direct_cost: dict[str, Decimal] = {
             route: Decimal(0) for route in funnels
         }
         route_independent_paid_attempts = {route: 0 for route in funnels}
@@ -2772,6 +2941,17 @@ class EvidenceService:
             response_status = row["response_status"]
             owner_flag = row["owner_or_test_flag"]
             payer = row["payer_wallet_hmac"]
+            try:
+                direct_cost = Decimal(str(row["direct_cost_estimate"] or 0))
+            except InvalidOperation:
+                direct_cost = Decimal(0)
+            route_direct_cost[route] += direct_cost
+            if owner_flag == "OWNER":
+                owner_direct_cost += direct_cost
+                route_owner_direct_cost[route] += direct_cost
+            elif owner_flag == "NON_OWNER_UNVERIFIED":
+                independent_direct_cost += direct_cost
+                route_independent_direct_cost[route] += direct_cost
             if response_status == "PAYMENT_REQUIRED":
                 funnels[route]["payment_challenges"] += 1
                 continue
@@ -2815,6 +2995,14 @@ class EvidenceService:
             funnel["independent_revenue_usd"] = (
                 f"{route_independent_revenue[route]:.2f}"
             )
+            funnel["direct_cost_usd"] = f"{route_direct_cost[route]:.2f}"
+            funnel["independent_direct_cost_usd"] = (
+                f"{route_independent_direct_cost[route]:.2f}"
+            )
+            funnel["owner_direct_cost_usd"] = f"{route_owner_direct_cost[route]:.2f}"
+            funnel["independent_gross_margin_usd"] = (
+                f"{route_independent_revenue[route] - route_independent_direct_cost[route]:.2f}"
+            )
             if route_independent_paid_attempts[route]:
                 funnel["independent_paid_fulfillment_rate_percent"] = round(
                     100
@@ -2841,6 +3029,11 @@ class EvidenceService:
             "repeat_independent_buyer_clusters": repeat_buyers,
             "independent_fulfilled_calls": independent_fulfilled,
             "independent_revenue_usd": f"{independent_revenue:.2f}",
+            "independent_direct_cost_usd": f"{independent_direct_cost:.2f}",
+            "independent_gross_margin_usd": (
+                f"{independent_revenue - independent_direct_cost:.2f}"
+            ),
+            "owner_direct_cost_usd": f"{owner_direct_cost:.2f}",
             "max_independent_buyer_call_share": (
                 round(top_buyer_share, 4) if top_buyer_share is not None else None
             ),

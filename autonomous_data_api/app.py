@@ -45,10 +45,12 @@ from x402.schemas import Network
 from x402.server import x402ResourceServer
 
 from autonomous_data_api.evidence import (
+    FORM_D_DOSSIER_PARSER_VERSION,
     FORM_D_PARSER_VERSION,
     SEC_PARSER_VERSION,
     EvidenceError,
     EvidenceService,
+    FormDCompanyDossierRequest,
     FormDFundingLeadsRequest,
     OfacExactRequest,
     OfacPreflightRequest,
@@ -60,6 +62,7 @@ from autonomous_data_api.evidence import (
 )
 from autonomous_data_api.marketplace import MarketplaceError, The402Provider
 from autonomous_data_api.monitors import MonitorError, WebMonitorService
+from autonomous_data_api.suppliers import DossierSupplierError, FundingDossierService
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +75,7 @@ X402_OFAC_PRICE = os.getenv("AUTONOMOUS_X402_OFAC_PRICE", "$0.05")
 X402_SEC_SIGNAL_PRICE = os.getenv("AUTONOMOUS_X402_SEC_SIGNAL_PRICE", "$0.01")
 X402_OFAC_PREFLIGHT_PRICE = os.getenv("AUTONOMOUS_X402_OFAC_PREFLIGHT_PRICE", "$0.01")
 X402_FORM_D_PRICE = os.getenv("AUTONOMOUS_X402_FORM_D_PRICE", "$0.05")
+X402_FORM_D_DOSSIER_PRICE = os.getenv("AUTONOMOUS_X402_FORM_D_DOSSIER_PRICE", "$0.25")
 X402_SOURCE_WATCH_PRICE = os.getenv("AUTONOMOUS_X402_SOURCE_WATCH_PRICE", "$1.00")
 X402_SOURCE_SNAPSHOT_PRICE = os.getenv("AUTONOMOUS_X402_SOURCE_SNAPSHOT_PRICE", "$0.03")
 CONVERSION_EXPERIMENT_START_UTC = os.getenv(
@@ -84,8 +88,11 @@ try:
     X402_DAILY_REVENUE_CAP_USD = Decimal(
         os.getenv("AUTONOMOUS_X402_DAILY_REVENUE_CAP_USD", "0")
     )
+    GTM_DOSSIER_SUPPLIER_DAILY_CAP_USD = Decimal(
+        os.getenv("AUTONOMOUS_GTM_DOSSIER_SUPPLIER_DAILY_CAP_USD", "0.05")
+    )
 except InvalidOperation as exc:
-    raise RuntimeError("AUTONOMOUS_X402_DAILY_REVENUE_CAP_USD must be numeric") from exc
+    raise RuntimeError("Revenue and supplier daily caps must be numeric") from exc
 X402_FACILITATOR_URL = os.getenv(
     "AUTONOMOUS_X402_FACILITATOR_URL",
     (
@@ -142,6 +149,11 @@ FORM_D_PROBE_PAYLOAD = {
     "limit": 10,
     "max_source_age_seconds": 600,
 }
+FORM_D_DOSSIER_PROBE_PAYLOAD = {
+    "cik": "0001847986",
+    "accession": "0001847986-26-000001",
+    "max_source_age_seconds": 600,
+}
 SOURCE_WATCH_PROBE_PAYLOAD = {
     "url": "https://www.sec.gov/newsroom/press-releases",
     "label": "SEC press releases",
@@ -192,6 +204,15 @@ def utc_now() -> str:
 evidence_service = EvidenceService()
 monitor_service = WebMonitorService(evidence_service.db_path)
 the402_provider = The402Provider(evidence_service.db_path, monitor_service)
+GTM_DOSSIER_ENABLED = os.getenv("AUTONOMOUS_GTM_DOSSIER_ENABLED", "0") == "1"
+funding_dossier_service = FundingDossierService(
+    evidence_service,
+    private_key=os.getenv("AUTONOMOUS_SUPPLIER_WALLET_PRIVATE_KEY", ""),
+    daily_cap_usd=GTM_DOSSIER_SUPPLIER_DAILY_CAP_USD,
+)
+GTM_DOSSIER_READY = (
+    GTM_DOSSIER_ENABLED and funding_dossier_service.configured and X402_REVENUE_READY
+)
 
 
 async def refresh_ofac_sources() -> None:
@@ -241,7 +262,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="Agent Evidence and Source Watch API",
-    version="0.7.0",
+    version="0.8.0",
     description=(
         "One-shot public-source extraction, long-running source-change monitoring, "
         "pay-per-call SEC Form D GTM signals, source-hashed EDGAR filing deltas, "
@@ -988,6 +1009,101 @@ x402_routes: dict[str, RouteConfig] = {
         ),
     ),
 }
+if GTM_DOSSIER_READY:
+    x402_routes["POST /v1/gtm/form-d-company-dossier"] = RouteConfig(
+        accepts=[
+            PaymentOption(
+                scheme="exact",
+                pay_to=X402_PAY_TO,
+                price=X402_FORM_D_DOSSIER_PRICE,
+                network=X402_NETWORK,
+            )
+        ],
+        mime_type="application/json",
+        description=(
+            "Turn one SEC Form D accession into an agent-ready funded-company "
+            "prospect dossier. Combines the official filing, reported offering "
+            "facts and related people with fresh web research in one call, then "
+            "returns source links, hashes, upstream settlement provenance, and a "
+            "signed receipt. No account or API key."
+        ),
+        service_name="Funded Company Prospect Dossier",
+        tags=[
+            "sec",
+            "form-d",
+            "company-research",
+            "sales-intelligence",
+            "prospecting",
+            "funding-signal",
+            "web-research",
+            "signed-evidence",
+        ],
+        icon_url=SERVICE_ICON_URL,
+        extensions=get_discovery_extension(
+            method="POST",
+            input=FORM_D_DOSSIER_PROBE_PAYLOAD,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "cik": {
+                        "type": "string",
+                        "pattern": "^[0-9]{1,10}$",
+                        "description": "Issuer CIK from a Form D signal.",
+                    },
+                    "accession": {
+                        "type": "string",
+                        "pattern": "^[0-9]{10}-[0-9]{2}-[0-9]{6}$",
+                        "description": "SEC Form D accession belonging to the CIK.",
+                    },
+                    "max_source_age_seconds": {
+                        "type": "integer",
+                        "minimum": 60,
+                        "maximum": 3600,
+                        "default": 600,
+                    },
+                },
+                "required": ["cik", "accession"],
+                "additionalProperties": False,
+            },
+            output=OutputConfig(
+                example={
+                    "request_id": "form_d_company_dossier_example",
+                    "decision": "FORM_D_COMPANY_DOSSIER_READY",
+                    "issuer": {"cik": "0001847986", "name": "Example, Inc."},
+                    "funding_signal": {"amount_sold_usd": "2000000"},
+                    "related_people": [],
+                    "web_research": {"sources": [], "source_count": 0},
+                    "provenance": {
+                        "parser_version": FORM_D_DOSSIER_PARSER_VERSION,
+                        "supplier_settlement_transaction": "0x...",
+                    },
+                    "receipt": {"algorithm": "Ed25519"},
+                },
+                schema={
+                    "type": "object",
+                    "required": [
+                        "request_id",
+                        "decision",
+                        "issuer",
+                        "funding_signal",
+                        "web_research",
+                        "provenance",
+                        "receipt",
+                    ],
+                    "properties": {
+                        "request_id": {"type": "string"},
+                        "decision": {"const": "FORM_D_COMPANY_DOSSIER_READY"},
+                        "issuer": {"type": "object"},
+                        "funding_signal": {"type": "object"},
+                        "related_people": {"type": "array"},
+                        "web_research": {"type": "object"},
+                        "provenance": {"type": "object"},
+                        "receipt": {"type": "object"},
+                    },
+                },
+            ),
+        ),
+    )
 app.add_middleware(PaymentMiddlewareASGI, routes=x402_routes, server=x402_server)
 
 
@@ -1185,6 +1301,9 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
             OFAC_PROBE_PAYLOAD,
         ),
     }
+    POST_PAYMENT_ROUTES: ClassVar[dict[str, str]] = {
+        "/v1/gtm/form-d-company-dossier": X402_FORM_D_DOSSIER_PRICE,
+    }
 
     def __init__(self, app: Any, service: EvidenceService) -> None:
         super().__init__(app)
@@ -1221,10 +1340,101 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
                 }
         return True
 
+    async def _dispatch_post_payment_route(
+        self, request: Request, call_next: Any, quoted_price: str
+    ) -> Response:
+        started = time.monotonic()
+        body = await request.body()
+        response = await call_next(request)
+        payment_signature = request.headers.get(
+            "payment-signature"
+        ) or request.headers.get("x-payment")
+        prepared: PreparedResult | None = getattr(
+            request.state, "evidence_prepared", None
+        )
+        if prepared is None:
+            request_hash = hashlib.sha256(body or b"{}").hexdigest()
+            prepared = PreparedResult(
+                request_id=f"post_payment_{request_hash[:24]}",
+                product="post_payment_quote",
+                request_hash=request_hash,
+                source_bundle_hash=request_hash,
+                result_hash=request_hash,
+                result={},
+            )
+        else:
+            response.headers["X-Evidence-Request-Id"] = prepared.request_id
+            response.headers["X-Evidence-Request-Hash"] = (
+                f"sha256:{prepared.request_hash}"
+            )
+            response.headers["X-Evidence-Result-Hash"] = (
+                f"sha256:{prepared.result_hash}"
+            )
+
+        payment_payload = decode_x402_json_header(payment_signature)
+        settlement = decode_x402_json_header(response.headers.get("payment-response"))
+        settlement_tx_hash = settlement.get("transaction") or settlement.get(
+            "transactionHash"
+        )
+        payer_wallet = find_wallet(payment_payload)
+        payment_failure_stage, payment_failure_reason = payment_failure_diagnostics(
+            response, payment_signature
+        )
+        if response.status_code == 402 and not payment_signature:
+            response_status = "PAYMENT_REQUIRED"
+        elif response.status_code < 400 and payment_signature:
+            response_status = "FULFILLED"
+        elif response.status_code == 402:
+            response_status = "PAYMENT_OR_SETTLEMENT_FAILED"
+        else:
+            response_status = f"HTTP_{response.status_code}"
+        try:
+            raw_user_agent = request.headers.get("user-agent")
+            await run_in_threadpool(
+                self.service.record_attempt,
+                prepared,
+                route=request.url.path,
+                quoted_price=quoted_price,
+                network=X402_NETWORK,
+                response_status=response_status,
+                latency_ms=int((time.monotonic() - started) * 1000),
+                direct_cost_estimate=getattr(
+                    request.state, "evidence_direct_cost_usd", Decimal(0)
+                ),
+                payment_signature=payment_signature,
+                settlement_tx_hash=settlement_tx_hash,
+                payer_wallet=payer_wallet,
+                client_identifier=request_client_identifier(request),
+                user_agent=raw_user_agent,
+                user_agent_family=user_agent_family(raw_user_agent),
+                referrer_origin=referrer_origin(request.headers.get("referer")),
+                edge_region=normalized_header_token(
+                    request.headers.get("fly-region"), 16
+                ),
+                proxy_request_id=normalized_header_token(
+                    request.headers.get("fly-request-id"), 128
+                ),
+                discovery_source=normalized_header_token(
+                    request.headers.get("x-agent-discovery-source"), 64
+                ),
+                agent_run_id=request.headers.get("x-agent-run-id"),
+                http_status=response.status_code,
+                payment_failure_stage=payment_failure_stage,
+                payment_failure_reason=payment_failure_reason,
+            )
+        except (sqlite3.Error, OSError):
+            response.headers["X-Evidence-Ledger"] = "write-failed"
+        return response
+
     async def dispatch(self, request: Request, call_next: Any) -> Any:
         if PUBLIC_SCHEME in {"http", "https"}:
             request.scope["scheme"] = PUBLIC_SCHEME
         route = self.ROUTES.get(request.url.path)
+        post_payment_price = self.POST_PAYMENT_ROUTES.get(request.url.path)
+        if request.method == "POST" and post_payment_price is not None:
+            return await self._dispatch_post_payment_route(
+                request, call_next, post_payment_price
+            )
         if request.method != "POST" or route is None:
             return await call_next(request)
         if os.getenv("AUTONOMOUS_EVIDENCE_ENABLED", "1") != "1":
@@ -1474,6 +1684,15 @@ app.add_middleware(
         ("POST", "/v1/web/source-snapshot"): price_decimal(X402_SOURCE_SNAPSHOT_PRICE),
         ("POST", "/v1/monitors/source-change"): price_decimal(X402_SOURCE_WATCH_PRICE),
         ("POST", "/v1/gtm/form-d-funding-leads"): price_decimal(X402_FORM_D_PRICE),
+        **(
+            {
+                ("POST", "/v1/gtm/form-d-company-dossier"): price_decimal(
+                    X402_FORM_D_DOSSIER_PRICE
+                )
+            }
+            if GTM_DOSSIER_READY
+            else {}
+        ),
         ("POST", "/v1/ofac/payment-preflight"): price_decimal(
             X402_OFAC_PREFLIGHT_PRICE
         ),
@@ -1525,6 +1744,11 @@ def health() -> dict[str, Any]:
                 "public_source_snapshot": X402_SOURCE_SNAPSHOT_PRICE,
                 "source_change_watch_30_day": X402_SOURCE_WATCH_PRICE,
                 "form_d_funding_leads": X402_FORM_D_PRICE,
+                **(
+                    {"form_d_company_dossier": X402_FORM_D_DOSSIER_PRICE}
+                    if GTM_DOSSIER_READY
+                    else {}
+                ),
                 "ofac_preflight": X402_OFAC_PREFLIGHT_PRICE,
                 "sec_signal": X402_SEC_SIGNAL_PRICE,
                 "ofac_exact": X402_OFAC_PRICE,
@@ -1543,6 +1767,13 @@ def health() -> dict[str, Any]:
                 if X402_PAY_TO_CONFIGURED
                 else "testnet-demo-recipient"
             ),
+        },
+        "funded_company_dossier": {
+            "enabled": GTM_DOSSIER_READY,
+            "supplier": "Tavily Search advanced via x402",
+            "supplier_cost_cap_per_call_usd": "0.01",
+            "supplier_daily_cap_usd": f"{GTM_DOSSIER_SUPPLIER_DAILY_CAP_USD:.2f}",
+            "supplier_wallet_configured": funding_dossier_service.configured,
         },
         "source_watch": monitor_service.public_stats(),
         "marketplace": {"the402": the402_provider.public_status()},
@@ -1613,6 +1844,14 @@ def sitemap() -> Response:
 @app.get("/llms.txt", include_in_schema=False)
 def llms_txt() -> PlainTextResponse:
     base_url = PUBLIC_BASE_URL.rstrip("/")
+    dossier_line = (
+        f"- POST {base_url}/v1/gtm/form-d-company-dossier - $0.25 USDC. "
+        "Turn one SEC Form D accession into a funded-company prospect dossier "
+        "with official filing facts, related people, fresh web research, source "
+        "hashes, upstream settlement provenance, and a signed receipt.\n"
+        if GTM_DOSSIER_READY
+        else ""
+    )
     return PlainTextResponse(
         f"""# Agent Evidence and Source Watch API
 
@@ -1622,7 +1861,7 @@ Long-running monitoring jobs and pay-per-call official-source evidence for auton
 - POST {base_url}/v1/web/source-snapshot - $0.03 USDC. Fetch one public HTTPS HTML, JSON, XML, or text source as normalized agent-ready text with optional literal excerpts, a content hash, and an Ed25519-signed receipt.
 - POST {base_url}/v1/monitors/source-change - $1.00 USDC. Monitor one public HTTPS text, HTML, JSON, or XML source every six hours for 30 days. Private polling and optional HMAC-signed change webhooks are included.
 - POST {base_url}/v1/gtm/form-d-funding-leads - $0.05 USDC. Find newly filed SEC Form D private-offering signals for GTM workflows. Filter by issuer state, industry keyword, and reported amount sold; returns official links, related people, and a cursor.
-- POST {base_url}/v1/ofac/payment-preflight - $0.01 USDC. Before sending funds, check whether an exact EVM destination address appears in current official OFAC SDN or Consolidated data. Compact decision output; no signed receipt.
+{dossier_line}- POST {base_url}/v1/ofac/payment-preflight - $0.01 USDC. Before sending funds, check whether an exact EVM destination address appears in current official OFAC SDN or Consolidated data. Compact decision output; no signed receipt.
 - POST {base_url}/v1/sec/filing-change-signal - $0.01 USDC. Check a ticker or CIK for a new 8-K, 10-Q, or 10-K after a timestamp. Compact filing signal and next-check cursor; no signed receipt.
 - POST {base_url}/v1/ofac/exact-identifier-evidence - $0.05 USDC. Premium exact OFAC evidence with source versions, hashes, matching records, limitations, and an Ed25519-signed receipt.
 - POST {base_url}/v1/sec/filing-trigger-delta - $0.10 USDC. Premium SEC evidence from a ticker or CIK and timestamp or accession, with document hashes, selected deterministic XBRL fact deltas, and an Ed25519-signed receipt.
@@ -1667,6 +1906,11 @@ def agent_manifest() -> dict[str, Any]:
                 "/v1/web/source-snapshot": X402_SOURCE_SNAPSHOT_PRICE,
                 "/v1/monitors/source-change": X402_SOURCE_WATCH_PRICE,
                 "/v1/gtm/form-d-funding-leads": X402_FORM_D_PRICE,
+                **(
+                    {"/v1/gtm/form-d-company-dossier": X402_FORM_D_DOSSIER_PRICE}
+                    if GTM_DOSSIER_READY
+                    else {}
+                ),
                 "/v1/ofac/payment-preflight": X402_OFAC_PREFLIGHT_PRICE,
                 "/v1/sec/filing-change-signal": X402_SEC_SIGNAL_PRICE,
                 "/v1/sec/filing-trigger-delta": X402_SEC_PRICE,
@@ -1692,6 +1936,11 @@ def agent_manifest() -> dict[str, Any]:
             f"{base_url}/v1/web/source-snapshot",
             f"{base_url}/v1/monitors/source-change",
             f"{base_url}/v1/gtm/form-d-funding-leads",
+            *(
+                [f"{base_url}/v1/gtm/form-d-company-dossier"]
+                if GTM_DOSSIER_READY
+                else []
+            ),
             f"{base_url}/v1/ofac/payment-preflight",
             f"{base_url}/v1/sec/filing-change-signal",
             f"{base_url}/v1/sec/filing-trigger-delta",
@@ -2001,6 +2250,56 @@ def form_d_funding_leads(
     return prepared.result
 
 
+@app.post(
+    "/v1/gtm/form-d-company-dossier",
+    include_in_schema=GTM_DOSSIER_READY,
+)
+async def form_d_company_dossier(
+    request: Request,
+    payload: FormDCompanyDossierRequest,
+) -> dict[str, Any]:
+    if not GTM_DOSSIER_READY:
+        raise HTTPException(
+            status_code=503,
+            detail="The funded-company dossier experiment is not activated",
+        )
+    payment_signature = request.headers.get("payment-signature") or request.headers.get(
+        "x-payment"
+    )
+    if not payment_signature:
+        raise HTTPException(
+            status_code=500, detail="Verified payment proof unavailable"
+        )
+    try:
+        prepared, direct_cost = await funding_dossier_service.build(
+            payload, payment_signature
+        )
+    except DossierSupplierError as exc:
+        request.state.evidence_direct_cost_usd = exc.direct_cost_usd
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "detail": exc.detail},
+        ) from exc
+    except EvidenceError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "detail": exc.detail},
+        ) from exc
+    request.state.evidence_prepared = prepared
+    request.state.evidence_direct_cost_usd = direct_cost
+    if not await run_in_threadpool(
+        evidence_service.bind_payment,
+        payment_signature,
+        prepared,
+        request.url.path,
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Payment proof is already bound to a different request",
+        )
+    return prepared.result
+
+
 @app.post("/v1/web/source-snapshot")
 def public_source_snapshot(
     request: Request,
@@ -2089,6 +2388,7 @@ def summary() -> dict[str, Any]:
         "products": [
             "/v1/monitors/source-change",
             "/v1/gtm/form-d-funding-leads",
+            *(["/v1/gtm/form-d-company-dossier"] if GTM_DOSSIER_READY else []),
             "/v1/ofac/payment-preflight",
             "/v1/sec/filing-change-signal",
             "/v1/sec/filing-trigger-delta",
@@ -2244,6 +2544,16 @@ def custom_openapi() -> dict[str, Any]:
             ),
         },
     }
+    if GTM_DOSSIER_READY:
+        paid_operations["/v1/gtm/form-d-company-dossier"] = {
+            "price": f"{price_decimal(X402_FORM_D_DOSSIER_PRICE):.6f}",
+            "example": FORM_D_DOSSIER_PROBE_PAYLOAD,
+            "description": (
+                "One-call funded-company prospect dossier combining official SEC "
+                "Form D facts with fresh web research, source hashes, upstream "
+                "settlement provenance, and a signed receipt."
+            ),
+        }
     sec_properties = schema["components"]["schemas"]["SecDeltaRequest"]["properties"]
     sec_properties["ticker"]["example"] = "AAPL"
     sec_properties["cik"]["example"] = "0000320193"
