@@ -55,9 +55,21 @@ directory will create demand.
 
 ## Scale Path
 
-Only after the day-30 gate passes:
+Parallel premium test, pre-registered 13 August 2026:
+
+- `$9.00` for a 30-day portfolio of 2-10 sources on the same six-hour cadence.
+- Sources are checked after payment authorization but before settlement; no
+  metered supplier is used.
+- Positive only after three independent premium payer clusters or one
+  independent repeat buyer across UTC days.
+- Stop or redesign after 30 days or 500 independent non-crawler challenges with
+  zero purchases. Owner settlements, catalog sweeps, and example-only calls do
+  not count.
+
+Only after the day-30 single-monitor gate passes:
 
 - Add a `$3.00` hourly-check tier.
-- Add a `$10.00` bundle for up to ten sources with one webhook.
+- Revisit higher-cadence or larger portfolio tiers only if both margin and
+  non-example usage support them.
 - Increase the daily accepted-revenue cap only after measured capacity and
   gross margin remain acceptable.

@@ -4,7 +4,10 @@ import pytest
 from pydantic import ValidationError
 
 from autonomous_data_api import monitors
-from autonomous_data_api.evidence import WebMonitorCreateRequest
+from autonomous_data_api.evidence import (
+    PortfolioMonitorCreateRequest,
+    WebMonitorCreateRequest,
+)
 from autonomous_data_api.monitors import MonitorError, WebMonitorService
 
 
@@ -88,6 +91,47 @@ def test_payment_proof_cannot_be_reused_for_another_request(tmp_path):
         activate(service, request_id="different-request")
     assert captured.value.code == "PAYMENT_ALREADY_USED"
     assert captured.value.status_code == 409
+
+
+def test_portfolio_activation_creates_private_idempotent_monitors(tmp_path):
+    service = WebMonitorService(tmp_path / "monitor.sqlite3")
+    sources = PortfolioMonitorCreateRequest(
+        sources=[
+            {"url": "https://example.com/one", "label": "One"},
+            {"url": "https://example.com/two", "label": "Two"},
+        ]
+    ).sources
+
+    created = service.activate_portfolio(
+        request_id="portfolio-fixture",
+        payment_signature="portfolio-proof",
+        sources=sources,
+        base_url="https://evidence.regulavita.com",
+    )
+    repeated = service.activate_portfolio(
+        request_id="portfolio-fixture",
+        payment_signature="portfolio-proof",
+        sources=sources,
+        base_url="https://evidence.regulavita.com",
+    )
+
+    assert repeated == created
+    assert created["source_count"] == 2
+    assert len({item["monitor_id"] for item in created["monitors"]}) == 2
+    assert service.public_stats()["active_monitors"] == 2
+    for item in created["monitors"]:
+        status = service.status(item["monitor_id"], item["access_token"])
+        assert status["status"] == "ACTIVE"
+
+
+def test_portfolio_request_rejects_duplicate_urls():
+    with pytest.raises(ValidationError, match="unique"):
+        PortfolioMonitorCreateRequest(
+            sources=[
+                {"url": "https://example.com/same"},
+                {"url": "https://example.com/same"},
+            ]
+        )
 
 
 def test_due_checks_store_baseline_then_detect_change(tmp_path, monkeypatch):

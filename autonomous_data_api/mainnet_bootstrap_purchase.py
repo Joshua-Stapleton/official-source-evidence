@@ -33,6 +33,34 @@ PRODUCTS = {
             "max_characters": 12000,
         },
     },
+    "source_watch": {
+        "endpoint": "https://evidence.regulavita.com/v1/monitors/source-change",
+        "amount_atomic": "1000000",
+        "arm_value": "1.00",
+        "payload": {
+            "url": "https://www.sec.gov/newsroom/press-releases",
+            "label": "SEC press releases owner bootstrap",
+        },
+    },
+    "portfolio_watch": {
+        "endpoint": (
+            "https://evidence.regulavita.com/v1/monitors/source-change-portfolio"
+        ),
+        "amount_atomic": "9000000",
+        "arm_value": "9.00",
+        "payload": {
+            "sources": [
+                {
+                    "url": "https://www.sec.gov/newsroom/press-releases",
+                    "label": "SEC press releases owner bootstrap",
+                },
+                {
+                    "url": "https://ofac.treasury.gov/recent-actions",
+                    "label": "OFAC recent actions owner bootstrap",
+                },
+            ]
+        },
+    },
     "form_d": {
         "endpoint": ("https://evidence.regulavita.com/v1/gtm/form-d-funding-leads"),
         "amount_atomic": "50000",
@@ -231,6 +259,11 @@ async def main() -> None:
                 "buyer": account.address,
                 "request_id": result.get("request_id"),
                 "decision": result.get("decision"),
+                "monitor_id": result.get("monitor_id"),
+                "portfolio_id": result.get("portfolio_id"),
+                "portfolio_source_count": result.get("source_count"),
+                "monitor_status": result.get("status"),
+                "monitor_expires_at": result.get("expires_at"),
                 "issuer": result.get("issuer"),
                 "web_source_count": result.get("web_research", {}).get("source_count"),
                 "supplier_settlement_transaction": result.get("provenance", {}).get(

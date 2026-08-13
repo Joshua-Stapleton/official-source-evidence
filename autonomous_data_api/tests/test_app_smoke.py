@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient
 
 from autonomous_data_api.app import (
     FORM_D_PROBE_PAYLOAD,
+    PORTFOLIO_WATCH_PROBE_PAYLOAD,
     SOURCE_SNAPSHOT_PROBE_PAYLOAD,
     SOURCE_WATCH_PROBE_PAYLOAD,
     CdpFacilitatorAuthProvider,
@@ -77,6 +78,11 @@ def prepared(monkeypatch):
         evidence_service,
         "prepare_web_monitor",
         lambda _: make("source_change_watch"),
+    )
+    monkeypatch.setattr(
+        evidence_service,
+        "prepare_portfolio_monitor",
+        lambda _: make("source_change_portfolio"),
     )
     monkeypatch.setattr(
         evidence_service,
@@ -214,6 +220,7 @@ def test_health_and_retired_wedges(client):
     assert health.json()["x402"]["prices"] == {
         "public_source_snapshot": "$0.03",
         "source_change_watch_30_day": "$1.00",
+        "source_change_portfolio_30_day": "$9.00",
         "form_d_funding_leads": "$0.05",
         "ofac_preflight": "$0.01",
         "sec_signal": "$0.01",
@@ -241,6 +248,7 @@ def test_agent_manifest_promotes_only_verdict_endpoints(client):
     assert payload["agent_paid_endpoints"] == [
         "http://localhost:8765/v1/web/source-snapshot",
         "http://localhost:8765/v1/monitors/source-change",
+        "http://localhost:8765/v1/monitors/source-change-portfolio",
         "http://localhost:8765/v1/gtm/form-d-funding-leads",
         "http://localhost:8765/v1/ofac/payment-preflight",
         "http://localhost:8765/v1/sec/filing-change-signal",
@@ -260,6 +268,7 @@ def test_machine_discovery_and_crawler_surfaces(client):
     expected = {
         "/v1/web/source-snapshot": "0.030000",
         "/v1/monitors/source-change": "1.000000",
+        "/v1/monitors/source-change-portfolio": "9.000000",
         "/v1/gtm/form-d-funding-leads": "0.050000",
         "/v1/ofac/payment-preflight": "0.010000",
         "/v1/sec/filing-change-signal": "0.010000",
@@ -300,6 +309,7 @@ def test_machine_discovery_and_crawler_surfaces(client):
     assert "/v1/ofac/exact-identifier-evidence - $0.05 USDC" in llms.text
     assert "/v1/sec/filing-trigger-delta - $0.10 USDC" in llms.text
     assert "/v1/monitors/source-change - $1.00 USDC" in llms.text
+    assert "/v1/monitors/source-change-portfolio - $9.00 USDC" in llms.text
 
     robots = client.get("/robots.txt")
     assert robots.status_code == 200
@@ -327,6 +337,13 @@ def test_machine_discovery_and_crawler_surfaces(client):
             "long-running-job",
             "1000000",
             "Source Change Watch",
+        ),
+        (
+            "/v1/monitors/source-change-portfolio",
+            PORTFOLIO_WATCH_PROBE_PAYLOAD,
+            "portfolio-monitoring",
+            "9000000",
+            "Source Change Portfolio",
         ),
         (
             "/v1/gtm/form-d-funding-leads",
@@ -418,6 +435,7 @@ def test_verdict_routes_advertise_payment_and_bazaar_post_schema(
     [
         ("/v1/web/source-snapshot", "30000"),
         ("/v1/monitors/source-change", "1000000"),
+        ("/v1/monitors/source-change-portfolio", "9000000"),
         ("/v1/gtm/form-d-funding-leads", "50000"),
         ("/v1/ofac/payment-preflight", "10000"),
         ("/v1/sec/filing-change-signal", "10000"),
@@ -435,6 +453,23 @@ def test_empty_post_is_a_monitorable_payment_probe(
     challenge = decode_challenge(response)
     assert challenge["accepts"][0]["amount"] == expected_amount
     assert challenge["resource"]["url"].endswith(path)
+
+
+def test_portfolio_probe_does_not_fetch_sources_before_payment(
+    client, prepared, monkeypatch
+):
+    monkeypatch.setattr(
+        "autonomous_data_api.app.fetch_public_source",
+        lambda _url: pytest.fail("unpaid portfolio probe fetched a source"),
+    )
+
+    response = client.post(
+        "/v1/monitors/source-change-portfolio",
+        json=PORTFOLIO_WATCH_PROBE_PAYLOAD,
+    )
+
+    assert response.status_code == 402
+    assert decode_challenge(response)["accepts"][0]["amount"] == "9000000"
 
 
 def test_payment_attempt_captures_privacy_safe_agent_attribution(

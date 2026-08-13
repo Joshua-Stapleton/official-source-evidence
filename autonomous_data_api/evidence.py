@@ -355,6 +355,18 @@ class WebMonitorCreateRequest(BaseModel):
         return cleaned
 
 
+class PortfolioMonitorCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sources: list[WebMonitorCreateRequest] = Field(min_length=2, max_length=10)
+
+    @model_validator(mode="after")
+    def unique_source_urls(self) -> PortfolioMonitorCreateRequest:
+        urls = [source.url for source in self.sources]
+        if len(set(urls)) != len(urls):
+            raise ValueError("source URLs must be unique")
+        return self
+
 class PublicSourceSnapshotRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1985,6 +1997,50 @@ class EvidenceService:
             include_receipt=False,
         )
 
+    def prepare_portfolio_monitor(
+        self, request: PortfolioMonitorCreateRequest
+    ) -> PreparedResult:
+        request_payload = request.model_dump(mode="json")
+        request_hash = sha256_json(request_payload)
+        source_bundle_hash = sha256_bytes(b"source-change-portfolio/1.0")
+        result_core = {
+            "product": "SOURCE_CHANGE_PORTFOLIO_30_DAY",
+            "source_count": len(request.sources),
+            "sources": [
+                {
+                    "url": source.url,
+                    "label": source.label,
+                    "webhook_configured": bool(source.webhook_url),
+                }
+                for source in request.sources
+            ],
+            "service_terms": {
+                "duration_days": 30,
+                "check_interval_seconds": 21600,
+                "maximum_sources": 10,
+                "maximum_response_bytes_per_source": 1000000,
+                "supported_scheme": "https",
+                "redirects_followed": False,
+            },
+            "provenance": {
+                "engine_version": "source-change-portfolio/1.0",
+                "request_sha256": f"sha256:{request_hash}",
+                "result_sha256": None,
+            },
+            "limitations": [
+                "Public HTTPS text, HTML, JSON, and XML sources only.",
+                "JavaScript-rendered content and authenticated pages are not supported.",
+                "A successful payment creates all monitors atomically; first baseline checks run asynchronously.",
+            ],
+        }
+        return self._store_prepared(
+            "source_change_portfolio",
+            request_hash,
+            source_bundle_hash,
+            result_core,
+            include_receipt=False,
+        )
+
     def prepare_public_source_snapshot(
         self, request: PublicSourceSnapshotRequest
     ) -> PreparedResult:
@@ -2868,6 +2924,15 @@ class EvidenceService:
                 "hypothesis": (
                     "Agents will pay for a persistent monitoring job that removes "
                     "repeated polling, state management, and change delivery."
+                ),
+            },
+            "/v1/monitors/source-change-portfolio": {
+                "tier": "premium-long-running-job",
+                "price_usd": "9.00",
+                "cohort_start_utc": "2026-08-13T09:16:30Z",
+                "hypothesis": (
+                    "Agents will spend below a common $10 session ceiling for a "
+                    "30-day portfolio job that replaces monitoring orchestration."
                 ),
             },
             "/v1/gtm/form-d-funding-leads": {

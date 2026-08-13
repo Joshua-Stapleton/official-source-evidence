@@ -6,15 +6,17 @@ Scope: Base-mainnet x402 services and Official Source Evidence price expansion
 
 ## Decision
 
-Do not launch a new $10 research endpoint yet. Continue the low-price discovery
-lane unchanged, expose explicit upgrades into the existing $0.25 dossier, and
-test the existing $1 persistent monitor before building a $5-$10 bundle.
+Run a tightly bounded premium-price experiment, but do not launch a generic $10
+research endpoint or make $10 the primary product. Continue the low-price
+discovery lane unchanged, expose explicit upgrades into the existing $0.25
+dossier, and test the existing $1 persistent monitor while specifying one
+decision-ready premium product in parallel.
 
-This is a no-go on an immediate $10 launch, not a no-go on higher-value agent
-commerce. The live evidence shows that agents can autonomously authorize larger
-payments when the output is immediately spendable or operationally durable. It
-does not yet show that they will pay $10 for a bespoke research response from an
-unfamiliar provider.
+This is a go on a cheap experiment and a no-go on a material product investment.
+The live evidence shows that programmatic wallets can authorize $10 when the
+output is immediately spendable, operationally durable, or controls a
+consequential decision. It does not show that most agents will pay $10 for a
+bespoke research response from an unfamiliar provider.
 
 ## Observed Evidence
 
@@ -36,21 +38,27 @@ $0.01-$0.05, not task-specific willingness to pay.
 
 ### Live Coinbase Bazaar census
 
-The public Bazaar API returned 1,550 active Base-mainnet resources accepting
-official Base USDC through the exact scheme. Current advertised prices were:
+The fully paginated public Bazaar API returned 15,090 Base-mainnet USDC
+resources. Current advertised prices and reported 30-day calls were:
 
 | Current price | Resources | Reported 30-day calls | Reported payer sum |
 |---|---:|---:|---:|
-| Below $0.01 | 715 | 119,207 | 15,279 |
-| $0.01-$0.099 | 606 | 61,595 | 2,227 |
-| $0.10-$0.99 | 203 | 4,182 | 489 |
-| $1.00-$4.99 | 21 | 376 | 79 |
-| $5.00-$9.99 | 2 | 51 | 21 |
-| $10.00 or more | 3 | 6 | 4 |
+| Below $0.50 | 14,573 | 330,913 | Not summed |
+| $0.50-$0.99 | 186 | 440 | Not summed |
+| $1.00-$4.99 | 210 | 1,015 | Not summed |
+| $5.00-$9.99 | 88 | 197 | Not summed |
+| $10.00-$24.99 | 15 | 44 | Not summed |
+| $25.00-$99.99 | 16 | 18 | Not summed |
+| $100 or more | 2 | 2 | Not summed |
 
-The payer column is a sum across routes, not ecosystem-unique wallets. Bazaar
-quality counts also include owner bootstrap calls and evaluators. Current price
-multiplied by historical calls is not revenue because prices can change.
+The listing-price median was $0.01, p95 $0.25, and p99 $2.00. On a call-weighted
+basis the median was $0.007, p95 $0.05, and p99 $0.28. Only 64 reported calls,
+0.019 percent, were on resources currently priced at $10 or more.
+
+Bazaar quality counts are route-level and can include owner bootstrap calls and
+evaluators. Current price multiplied by historical calls is not revenue because
+prices can change. The catalog also changed slightly during pagination, so these
+figures are a point-in-time census rather than a stable population total.
 
 ### Higher-price forensic checks
 
@@ -66,6 +74,12 @@ multiplied by historical calls is not revenue because prices can change.
   wallets. One payer received funds from the seller, sent only to that seller,
   and was funded immediately before its $10 payment. That cluster is consistent
   with operator testing, not independent demand.
+- The strongest $10 API case is Arkham's address-counterparties product: three
+  catalog calls from two payer wallets and two distinct on-chain $10
+  settlements. Both wallets also bought cheaper Arkham routes; one progressed
+  through $0.20, $1, and $10 purchases. That is consistent with an automated
+  evaluator or workflow escalating spend, but does not rule out vendor or
+  partner testing.
 - The strongest adjacent company-dossier offers in Bazaar are currently
   $0.12-$0.95. Their payer counts are small and do not establish independent
   repeat demand.
@@ -77,6 +91,9 @@ multiplied by historical calls is not revenue because prices can change.
   consume an entire default session budget even when technically permitted.
 - Coinbase AgentKit discovery supports a maximum-price filter. Buyers can omit
   expensive services before an agent evaluates their descriptions.
+- The legacy official `x402-fetch` client defaulted to a $0.10 maximum unless
+  the caller explicitly overrode it. Older unmodified clients will reject a $10
+  challenge.
 - x402 itself does not guarantee a universal buyer ceiling; spending authority
   is imposed by the wallet, framework, session, operator, and task policy.
 
@@ -109,24 +126,36 @@ Success within 14 full days after the $1 route is indexed:
 - one existing independent buyer upgrades to the $0.25 dossier; or
 - one independent buyer returns on another UTC day and uses a non-example input.
 
-Failure: no independent upgrade and no persistent-job purchase. On failure, do
-not build the $5-$10 monitoring bundle.
+Failure: no independent upgrade and no persistent-job purchase. On failure,
+stop further polishing of the single-source lane; the separately pre-registered
+premium test remains governed by its own 30-day or 500-challenge stop rule.
 
-### Stage 2: $5 bundle, conditional
+### Parallel premium specification
 
-Only after Stage 1 succeeds, build one bounded portfolio monitor for up to ten
-public sources for 30 days. It must reuse the current monitor engine, have no
-new fixed hosting cost, cap response bytes and webhooks, and keep per-sale direct
-cost below $0.50.
+Two candidates were evaluated. A decision-ready SEC Claim Evidence Pack would
+be valuable, but it requires a new claim interpretation and supplier layer to
+avoid returning superficial rule matches. It therefore fails the one-day reuse
+gate and remains unbuilt.
 
-Success: two independent $5 buyers, at least one using non-example URLs, with no
-buyer responsible for more than 50 percent of fulfilled calls.
+The candidate that passes the gate is a 30-day Source Change Portfolio. One
+`$9.00` payment creates private six-hour-cadence monitoring for 2-10 public
+HTTPS sources, with polling tokens and optional signed webhooks for every
+source. It reuses the current bounded monitor engine and existing Fly machine,
+performs reachability checks only after payment authorization and before
+settlement, and has no metered supplier cost. The price sits below a common
+`$10` session ceiling and leaves `$1.00` for discovery calls. Existing products
+retain their prices.
 
-### Stage 3: $10 bundle, conditional
+Positive gate: three independent premium payer clusters or one independent repeat
+buyer across different UTC days. Stop or redesign after 30 days or 500
+independent non-crawler challenges with zero purchases. Do not count owner
+settlements, catalog sweeps, or published-example requests as product demand.
 
-Only after Stage 2 succeeds, test a larger portfolio or a durable evidence job
-whose output saves at least one full agent workflow. Do not reprice an existing
-one-shot endpoint to manufacture this test.
+### Higher tiers, conditional
+
+Only after the `$9.00` premium experiment succeeds, test a higher-cadence or
+larger durable evidence job whose output saves at least one full agent workflow.
+Do not reprice an existing one-shot endpoint to manufacture this test.
 
 ## Sources
 
@@ -142,6 +171,12 @@ one-shot endpoint to manufacture this test.
   https://www.chainalysis.com/blog/x402-agentic-payments-adoption/
 - Base transaction explorer used for settlement checks:
   https://base.blockscout.com/
+- Arkham $10 settlement one:
+  https://base.blockscout.com/tx/0xc141d16eca1f9dd8645b85aa27aad8be91725278dfd07aff06675914f4672fb5
+- Arkham $10 settlement two:
+  https://base.blockscout.com/tx/0x78ed382346897944686d49f772c523e7966e73c8e585f48d7c9509a2b1229851
+- Legacy x402-fetch maximum-value behavior:
+  https://www.npmjs.com/package/x402-fetch
 
 ## Cost and Stop Rule
 

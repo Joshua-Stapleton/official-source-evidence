@@ -55,13 +55,18 @@ from autonomous_data_api.evidence import (
     OfacExactRequest,
     OfacPreflightRequest,
     PreparedResult,
+    PortfolioMonitorCreateRequest,
     PublicSourceSnapshotRequest,
     SecDeltaRequest,
     SecSignalRequest,
     WebMonitorCreateRequest,
 )
 from autonomous_data_api.marketplace import MarketplaceError, The402Provider
-from autonomous_data_api.monitors import MonitorError, WebMonitorService
+from autonomous_data_api.monitors import (
+    MonitorError,
+    WebMonitorService,
+    fetch_public_source,
+)
 from autonomous_data_api.suppliers import DossierSupplierError, FundingDossierService
 
 logger = logging.getLogger(__name__)
@@ -77,6 +82,9 @@ X402_OFAC_PREFLIGHT_PRICE = os.getenv("AUTONOMOUS_X402_OFAC_PREFLIGHT_PRICE", "$
 X402_FORM_D_PRICE = os.getenv("AUTONOMOUS_X402_FORM_D_PRICE", "$0.05")
 X402_FORM_D_DOSSIER_PRICE = os.getenv("AUTONOMOUS_X402_FORM_D_DOSSIER_PRICE", "$0.25")
 X402_SOURCE_WATCH_PRICE = os.getenv("AUTONOMOUS_X402_SOURCE_WATCH_PRICE", "$1.00")
+X402_PORTFOLIO_WATCH_PRICE = os.getenv(
+    "AUTONOMOUS_X402_PORTFOLIO_WATCH_PRICE", "$9.00"
+)
 X402_SOURCE_SNAPSHOT_PRICE = os.getenv("AUTONOMOUS_X402_SOURCE_SNAPSHOT_PRICE", "$0.03")
 CONVERSION_EXPERIMENT_START_UTC = os.getenv(
     "AUTONOMOUS_CONVERSION_EXPERIMENT_START_UTC", ""
@@ -157,6 +165,18 @@ FORM_D_DOSSIER_PROBE_PAYLOAD = {
 SOURCE_WATCH_PROBE_PAYLOAD = {
     "url": "https://www.sec.gov/newsroom/press-releases",
     "label": "SEC press releases",
+}
+PORTFOLIO_WATCH_PROBE_PAYLOAD = {
+    "sources": [
+        {
+            "url": "https://www.sec.gov/newsroom/press-releases",
+            "label": "SEC press releases",
+        },
+        {
+            "url": "https://ofac.treasury.gov/recent-actions",
+            "label": "OFAC recent actions",
+        },
+    ]
 }
 SOURCE_SNAPSHOT_PROBE_PAYLOAD = {
     "url": "https://www.sec.gov/newsroom/press-releases",
@@ -522,6 +542,103 @@ x402_routes: dict[str, RouteConfig] = {
                         "access_token": {"type": "string"},
                         "status_url": {"type": "string", "format": "uri"},
                         "webhook": {"type": "object"},
+                    },
+                },
+            ),
+        ),
+    ),
+    "POST /v1/monitors/source-change-portfolio": RouteConfig(
+        accepts=[
+            PaymentOption(
+                scheme="exact",
+                pay_to=X402_PAY_TO,
+                price=X402_PORTFOLIO_WATCH_PRICE,
+                network=X402_NETWORK,
+            )
+        ],
+        mime_type="application/json",
+        description=(
+            "Monitor 2-10 public HTTPS text, HTML, JSON, or XML sources every "
+            "six hours for 30 days. One payment creates private polling tokens "
+            "and optional HMAC-signed change webhooks for every source."
+        ),
+        service_name="Source Change Portfolio",
+        tags=[
+            "monitoring",
+            "portfolio-monitoring",
+            "change-detection",
+            "webhook",
+            "long-running-job",
+            "source-diff",
+        ],
+        icon_url=SERVICE_ICON_URL,
+        extensions=get_discovery_extension(
+            method="POST",
+            input=PORTFOLIO_WATCH_PROBE_PAYLOAD,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "sources": {
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": 10,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "url": {
+                                    "type": "string",
+                                    "format": "uri",
+                                    "pattern": "^https://",
+                                    "maxLength": 2048,
+                                },
+                                "label": {"type": "string", "maxLength": 120},
+                                "webhook_url": {
+                                    "type": "string",
+                                    "format": "uri",
+                                    "pattern": "^https://",
+                                    "maxLength": 2048,
+                                },
+                            },
+                            "required": ["url"],
+                            "additionalProperties": False,
+                        },
+                    }
+                },
+                "required": ["sources"],
+                "additionalProperties": False,
+            },
+            output=OutputConfig(
+                example={
+                    "portfolio_id": "portfolio_example",
+                    "status": "ACTIVE",
+                    "source_count": 2,
+                    "expires_at": "2026-09-12T00:00:00+00:00",
+                    "check_interval_seconds": 21600,
+                    "monitors": [
+                        {
+                            "monitor_id": "mon_example",
+                            "access_token": "returned_once_after_payment",
+                            "status_url": f"{PUBLIC_BASE_URL.rstrip('/')}/v1/monitors/mon_example",
+                        }
+                    ],
+                },
+                schema={
+                    "type": "object",
+                    "required": [
+                        "portfolio_id",
+                        "status",
+                        "source_count",
+                        "expires_at",
+                        "check_interval_seconds",
+                        "monitors",
+                    ],
+                    "properties": {
+                        "portfolio_id": {"type": "string"},
+                        "status": {"type": "string"},
+                        "source_count": {"type": "integer"},
+                        "expires_at": {"type": "string", "format": "date-time"},
+                        "check_interval_seconds": {"type": "integer"},
+                        "monitors": {"type": "array"},
                     },
                 },
             ),
@@ -1291,6 +1408,12 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
             X402_SOURCE_WATCH_PRICE,
             SOURCE_WATCH_PROBE_PAYLOAD,
         ),
+        "/v1/monitors/source-change-portfolio": (
+            PortfolioMonitorCreateRequest,
+            "prepare_portfolio_monitor",
+            X402_PORTFOLIO_WATCH_PRICE,
+            PORTFOLIO_WATCH_PROBE_PAYLOAD,
+        ),
         "/v1/gtm/form-d-funding-leads": (
             FormDFundingLeadsRequest,
             "prepare_form_d_funding_leads",
@@ -1704,6 +1827,9 @@ app.add_middleware(
     route_prices={
         ("POST", "/v1/web/source-snapshot"): price_decimal(X402_SOURCE_SNAPSHOT_PRICE),
         ("POST", "/v1/monitors/source-change"): price_decimal(X402_SOURCE_WATCH_PRICE),
+        ("POST", "/v1/monitors/source-change-portfolio"): price_decimal(
+            X402_PORTFOLIO_WATCH_PRICE
+        ),
         ("POST", "/v1/gtm/form-d-funding-leads"): price_decimal(X402_FORM_D_PRICE),
         **(
             {
@@ -1764,6 +1890,7 @@ def health() -> dict[str, Any]:
             "prices": {
                 "public_source_snapshot": X402_SOURCE_SNAPSHOT_PRICE,
                 "source_change_watch_30_day": X402_SOURCE_WATCH_PRICE,
+                "source_change_portfolio_30_day": X402_PORTFOLIO_WATCH_PRICE,
                 "form_d_funding_leads": X402_FORM_D_PRICE,
                 **(
                     {"form_d_company_dossier": X402_FORM_D_DOSSIER_PRICE}
@@ -1850,6 +1977,7 @@ def sitemap() -> Response:
         "/openapi.json",
         "/v1/web/source-snapshot/sample",
         "/v1/monitors/source-change/sample",
+        "/v1/monitors/source-change-portfolio/sample",
         "/v1/gtm/form-d-funding-leads/sample",
         "/v1/sec/sample",
         "/v1/ofac/sample",
@@ -1881,6 +2009,7 @@ Long-running monitoring jobs and pay-per-call official-source evidence for auton
 ## Paid endpoints
 - POST {base_url}/v1/web/source-snapshot - $0.03 USDC. Fetch one public HTTPS HTML, JSON, XML, or text source as normalized agent-ready text with optional literal excerpts, a content hash, and an Ed25519-signed receipt.
 - POST {base_url}/v1/monitors/source-change - $1.00 USDC. Monitor one public HTTPS text, HTML, JSON, or XML source every six hours for 30 days. Private polling and optional HMAC-signed change webhooks are included.
+- POST {base_url}/v1/monitors/source-change-portfolio - $9.00 USDC. Monitor 2-10 public HTTPS sources every six hours for 30 days. One payment returns private polling tokens and optional signed webhooks for every source.
 - POST {base_url}/v1/gtm/form-d-funding-leads - $0.05 USDC. Find newly filed SEC Form D private-offering signals for GTM workflows. Filter by issuer state, industry keyword, and reported amount sold; returns official links, related people, and a cursor.
 {dossier_line}- POST {base_url}/v1/ofac/payment-preflight - $0.01 USDC. Before sending funds, check whether an exact EVM destination address appears in current official OFAC SDN or Consolidated data. Compact decision output; no signed receipt.
 - POST {base_url}/v1/sec/filing-change-signal - $0.01 USDC. Check a ticker or CIK for a new 8-K, 10-Q, or 10-K after a timestamp. Compact filing signal and next-check cursor; no signed receipt.
@@ -1893,6 +2022,7 @@ Long-running monitoring jobs and pay-per-call official-source evidence for auton
 - Interactive docs: {base_url}/docs
 - Public Source Snapshot sample: {base_url}/v1/web/source-snapshot/sample
 - Source Watch sample: {base_url}/v1/monitors/source-change/sample
+- Portfolio Watch sample: {base_url}/v1/monitors/source-change-portfolio/sample
 - Form D sample: {base_url}/v1/gtm/form-d-funding-leads/sample
 - OFAC sample: {base_url}/v1/ofac/sample
 - SEC sample: {base_url}/v1/sec/sample
@@ -1926,6 +2056,7 @@ def agent_manifest() -> dict[str, Any]:
             "prices": {
                 "/v1/web/source-snapshot": X402_SOURCE_SNAPSHOT_PRICE,
                 "/v1/monitors/source-change": X402_SOURCE_WATCH_PRICE,
+                "/v1/monitors/source-change-portfolio": X402_PORTFOLIO_WATCH_PRICE,
                 "/v1/gtm/form-d-funding-leads": X402_FORM_D_PRICE,
                 **(
                     {"/v1/gtm/form-d-company-dossier": X402_FORM_D_DOSSIER_PRICE}
@@ -1949,6 +2080,7 @@ def agent_manifest() -> dict[str, Any]:
         "sample_endpoints": [
             f"{base_url}/v1/web/source-snapshot/sample",
             f"{base_url}/v1/monitors/source-change/sample",
+            f"{base_url}/v1/monitors/source-change-portfolio/sample",
             f"{base_url}/v1/gtm/form-d-funding-leads/sample",
             f"{base_url}/v1/sec/sample",
             f"{base_url}/v1/ofac/sample",
@@ -1956,6 +2088,7 @@ def agent_manifest() -> dict[str, Any]:
         "agent_paid_endpoints": [
             f"{base_url}/v1/web/source-snapshot",
             f"{base_url}/v1/monitors/source-change",
+            f"{base_url}/v1/monitors/source-change-portfolio",
             f"{base_url}/v1/gtm/form-d-funding-leads",
             *(
                 [f"{base_url}/v1/gtm/form-d-company-dossier"]
@@ -2169,6 +2302,43 @@ def source_change_watch_sample() -> dict[str, Any]:
     }
 
 
+@app.get("/v1/monitors/source-change-portfolio/sample")
+def source_change_portfolio_sample() -> dict[str, Any]:
+    return {
+        "sample_type": "static_contract_fixture",
+        "endpoint": {
+            "path": "/v1/monitors/source-change-portfolio",
+            "price": X402_PORTFOLIO_WATCH_PRICE,
+            "payment": "x402 v2 USDC on Base",
+        },
+        "request": PORTFOLIO_WATCH_PROBE_PAYLOAD,
+        "service": {
+            "duration_days": 30,
+            "source_count": {"minimum": 2, "maximum": 10},
+            "check_interval_seconds": 21600,
+            "supported_content": ["HTML", "JSON", "plain text", "XML"],
+            "maximum_response_bytes_per_source": 1000000,
+            "delivery": ["authenticated polling", "optional signed webhook"],
+        },
+        "response_shape": {
+            "portfolio_id": "portfolio_example",
+            "status": "ACTIVE",
+            "source_count": 2,
+            "monitors": [
+                {
+                    "monitor_id": "mon_example",
+                    "access_token": "returned after successful payment",
+                    "status_url": f"{PUBLIC_BASE_URL.rstrip('/')}/v1/monitors/mon_example",
+                }
+            ],
+        },
+        "limitations": [
+            "Public HTTPS sources only.",
+            "No JavaScript rendering, login, cookies, or redirect following.",
+        ],
+    }
+
+
 def _monitor_access_token(authorization: str | None) -> str:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Bearer access token is required")
@@ -2202,6 +2372,36 @@ def create_source_change_watch(
             url=validated.url,
             label=validated.label,
             webhook_url=validated.webhook_url,
+            base_url=PUBLIC_BASE_URL,
+        )
+    except MonitorError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+
+@app.post("/v1/monitors/source-change-portfolio")
+def create_source_change_portfolio(
+    request: Request,
+    payload: PortfolioMonitorCreateRequest | None = None,
+    payment_signature: str | None = Header(default=None, alias="Payment-Signature"),
+    x_payment: str | None = Header(default=None, alias="X-Payment"),
+) -> dict[str, Any]:
+    del payload
+    prepared: PreparedResult | None = getattr(request.state, "evidence_prepared", None)
+    validated: PortfolioMonitorCreateRequest | None = getattr(
+        request.state, "evidence_validated", None
+    )
+    signature = payment_signature or x_payment
+    if prepared is None or validated is None or not signature:
+        raise HTTPException(
+            status_code=503, detail="Paid portfolio activation unavailable"
+        )
+    try:
+        for source in validated.sources:
+            fetch_public_source(source.url)
+        return monitor_service.activate_portfolio(
+            request_id=prepared.request_id,
+            payment_signature=signature,
+            sources=validated.sources,
             base_url=PUBLIC_BASE_URL,
         )
     except MonitorError as exc:
@@ -2408,6 +2608,7 @@ def summary() -> dict[str, Any]:
         "service": "Agent Evidence and Source Watch API",
         "products": [
             "/v1/monitors/source-change",
+            "/v1/monitors/source-change-portfolio",
             "/v1/gtm/form-d-funding-leads",
             *(["/v1/gtm/form-d-company-dossier"] if GTM_DOSSIER_READY else []),
             "/v1/ofac/payment-preflight",
@@ -2521,6 +2722,15 @@ def custom_openapi() -> dict[str, Any]:
                 "Create a 30-day source-change monitor for one public HTTPS text, "
                 "HTML, JSON, or XML source. Checks every six hours and includes "
                 "private polling plus optional HMAC-signed webhooks."
+            ),
+        },
+        "/v1/monitors/source-change-portfolio": {
+            "price": f"{price_decimal(X402_PORTFOLIO_WATCH_PRICE):.6f}",
+            "example": PORTFOLIO_WATCH_PROBE_PAYLOAD,
+            "description": (
+                "Create 2-10 source-change monitors for 30 days in one paid "
+                "portfolio. Checks every six hours and returns private polling "
+                "tokens plus optional HMAC-signed webhooks for each source."
             ),
         },
         "/v1/gtm/form-d-funding-leads": {

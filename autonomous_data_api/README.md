@@ -9,6 +9,8 @@ Paid candidates:
 
 - `POST /v1/web/source-snapshot` at `$0.03` USDC per fulfilled call.
 - `POST /v1/monitors/source-change` at `$1.00` USDC per 30-day monitor.
+- `POST /v1/monitors/source-change-portfolio` at `$9.00` USDC per 30-day
+  portfolio of 2-10 sources.
 - `POST /v1/gtm/form-d-funding-leads` at `$0.05` USDC per fulfilled call.
 - Dormant until explicitly activated: `POST /v1/gtm/form-d-company-dossier` at
   `$0.25` USDC, with a maximum `$0.01` paid-search input per fulfilled call.
@@ -27,6 +29,12 @@ excerpts, a content hash, and a signed receipt. It does not render JavaScript,
 follow redirects, access authenticated pages, or make claims about publisher
 authorship or truth. Successful buyers can upgrade the same URL to the 30-day
 Source Watch product without requiring a new account or credential.
+
+The portfolio monitor reuses the same bounded source engine for 2-10 unique
+public HTTPS URLs. A successful payment atomically creates a private monitor and
+access token for each source. Reachability is checked after payment authorization
+but before settlement, there is no metered supplier, and the route is priced
+below a `$10` session ceiling.
 
 The Form D GTM endpoint scans official SEC daily indexes in bounded pages. It
 filters new filings by issuer state, industry keyword, and issuer-reported amount
@@ -95,6 +103,7 @@ Useful local URLs:
 - `http://127.0.0.1:8765/.well-known/agent-service.json`
 - `http://127.0.0.1:8765/v1/experiments/status`
 - `http://127.0.0.1:8765/v1/web/source-snapshot/sample`
+- `http://127.0.0.1:8765/v1/monitors/source-change-portfolio/sample`
 - `http://127.0.0.1:8765/v1/gtm/form-d-funding-leads/sample`
 - `http://127.0.0.1:8765/v1/sec/sample`
 - `http://127.0.0.1:8765/v1/ofac/sample`

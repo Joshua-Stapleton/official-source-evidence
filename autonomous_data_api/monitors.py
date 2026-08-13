@@ -419,6 +419,101 @@ class WebMonitorService:
             "next_step": "Poll status_url with Authorization: Bearer <access_token>.",
         }
 
+    def activate_portfolio(
+        self,
+        *,
+        request_id: str,
+        payment_signature: str,
+        sources: list[Any],
+        base_url: str,
+    ) -> dict[str, Any]:
+        if not 2 <= len(sources) <= 10:
+            raise MonitorError(
+                "INVALID_PORTFOLIO_SIZE",
+                "A portfolio must contain between 2 and 10 sources",
+            )
+        now = datetime.now(timezone.utc)
+        expires = now + timedelta(days=MONITOR_DURATION_DAYS)
+        base = base_url.rstrip("/")
+        monitors = []
+        with self._connect() as connection:
+            for index, source in enumerate(sources):
+                source_proof = f"{payment_signature}:portfolio-source:{index}"
+                payment_hash = sha256_bytes(source_proof.encode("utf-8"))
+                source_request_id = f"{request_id}:{index}"
+                monitor_id = (
+                    f"mon_{sha256_bytes(f'{source_request_id}:{payment_hash}'.encode())[:24]}"
+                )
+                access_token = self._derive("access", monitor_id, payment_hash)
+                webhook_secret = (
+                    self._derive("webhook", monitor_id, payment_hash)
+                    if source.webhook_url
+                    else None
+                )
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO web_monitors (
+                        monitor_id, request_id, payment_signature_hash, url, label,
+                        webhook_url, access_token_hash, webhook_secret_hash, status,
+                        created_at, expires_at, next_check_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?)
+                    """,
+                    (
+                        monitor_id,
+                        source_request_id,
+                        payment_hash,
+                        source.url,
+                        source.label,
+                        source.webhook_url,
+                        sha256_bytes(access_token.encode("utf-8")),
+                        sha256_bytes(webhook_secret.encode("utf-8"))
+                        if webhook_secret
+                        else None,
+                        now.isoformat(),
+                        expires.isoformat(),
+                        now.isoformat(),
+                    ),
+                )
+                row = connection.execute(
+                    "SELECT * FROM web_monitors WHERE payment_signature_hash = ?",
+                    (payment_hash,),
+                ).fetchone()
+                if row is None or row["monitor_id"] != monitor_id:
+                    raise MonitorError(
+                        "PAYMENT_ALREADY_USED",
+                        "Payment proof is already bound to a different portfolio",
+                        409,
+                    )
+                monitors.append(
+                    {
+                        "monitor_id": monitor_id,
+                        "status": row["status"],
+                        "url": row["url"],
+                        "label": row["label"],
+                        "created_at": row["created_at"],
+                        "expires_at": row["expires_at"],
+                        "access_token": access_token,
+                        "status_url": f"{base}/v1/monitors/{monitor_id}",
+                        "cancel_url": f"{base}/v1/monitors/{monitor_id}",
+                        "webhook": {
+                            "configured": bool(source.webhook_url),
+                            "signature_header": "X-Source-Watch-Signature",
+                            "signing_secret": webhook_secret,
+                        },
+                    }
+                )
+        return {
+            "portfolio_id": (
+                f"portfolio_{sha256_bytes(f'{request_id}:{sha256_bytes(payment_signature.encode())}'.encode())[:24]}"
+            ),
+            "status": "ACTIVE",
+            "source_count": len(monitors),
+            "expires_at": min(monitor["expires_at"] for monitor in monitors),
+            "check_interval_seconds": CHECK_INTERVAL_SECONDS,
+            "monitors": monitors,
+            "next_step": "Poll each status_url with its corresponding access_token.",
+        }
+
     def _authorized_row(self, monitor_id: str, access_token: str) -> sqlite3.Row:
         with self._connect() as connection:
             row = connection.execute(
