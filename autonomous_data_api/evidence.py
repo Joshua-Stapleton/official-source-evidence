@@ -1797,6 +1797,23 @@ class EvidenceService:
                 "scanned_count": scanned_count,
                 "scan_limit": MAX_FORM_D_SCAN_PER_REQUEST,
             },
+            "upgrade": {
+                "path": "/v1/gtm/form-d-company-dossier",
+                "price": os.getenv(
+                    "AUTONOMOUS_X402_FORM_D_DOSSIER_PRICE", "$0.25"
+                ),
+                "purpose": (
+                    "Add fresh web research, supplier settlement provenance, "
+                    "source hashes, and a signed dossier receipt for one lead."
+                ),
+                "requests": [
+                    {
+                        "cik": lead["issuer"]["cik"],
+                        "accession": lead["accession"],
+                    }
+                    for lead in leads[:5]
+                ],
+            },
             "provenance": {
                 "publisher": "U.S. Securities and Exchange Commission",
                 "official_index_urls": index_urls,

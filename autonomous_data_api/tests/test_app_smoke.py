@@ -402,6 +402,15 @@ def test_verdict_routes_advertise_payment_and_bazaar_post_schema(
     assert challenge["resource"]["serviceName"] == expected_service
     assert expected_tag in challenge["resource"]["tags"]
     assert challenge["extensions"]["bazaar"]["info"]["input"]["method"] == "POST"
+    if path == "/v1/gtm/form-d-funding-leads":
+        output = challenge["extensions"]["bazaar"]["info"]["output"]
+        assert output["example"]["upgrade"] == {
+            "path": "/v1/gtm/form-d-company-dossier",
+            "price": "$0.25",
+            "requests": [],
+        }
+        output_schema = challenge["extensions"]["bazaar"]["schema"]["properties"]
+        assert "upgrade" in output_schema["output"]["properties"]["example"]["required"]
 
 
 @pytest.mark.parametrize(

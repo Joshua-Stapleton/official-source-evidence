@@ -503,6 +503,15 @@ def test_form_d_funding_leads_filters_paginates_and_preserves_source_basis(
     ]
     assert first.result["pagination"]["has_more"] is True
     assert first.result["pagination"]["next_cursor"] == accessions[0]
+    assert first.result["upgrade"] == {
+        "path": "/v1/gtm/form-d-company-dossier",
+        "price": "$0.25",
+        "purpose": (
+            "Add fresh web research, supplier settlement provenance, source hashes, "
+            "and a signed dossier receipt for one lead."
+        ),
+        "requests": [{"cik": cik, "accession": accessions[0]}],
+    }
     assert "receipt" in first.result
     assert "not proof" in " ".join(first.result["limitations"]).lower()
 
@@ -518,6 +527,9 @@ def test_form_d_funding_leads_filters_paginates_and_preserves_source_basis(
     assert second.result["leads"][0]["issuer"]["name"] == "Example Two"
     assert second.result["pagination"]["has_more"] is False
     assert second.result["pagination"]["next_cursor"] is None
+    assert second.result["upgrade"]["requests"] == [
+        {"cik": cik, "accession": accessions[1]}
+    ]
 
 
 def test_form_d_company_dossier_is_source_hashed_and_signed(tmp_path, monkeypatch):
