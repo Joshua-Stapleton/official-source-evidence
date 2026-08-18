@@ -316,6 +316,10 @@ def test_procurement_quote_and_sample_are_free_and_strict(client):
     assert quote.json()["maximum_supplier_cost_usd"] == "0.02"
     assert len(quote.json()["supplier_plan"]) == 2
 
+    assert sample.json()["example_result"]["source_records"] == [
+        {"title": "Stripe", "url": "https://stripe.com"}
+    ]
+
     invalid = client.post(
         "/v1/procure/company-profile/quote",
         json={"company_name": "Stripe", "domain": "https://stripe.com/path"},

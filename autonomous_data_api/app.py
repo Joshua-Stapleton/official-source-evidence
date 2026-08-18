@@ -1325,6 +1325,9 @@ if PROCUREMENT_READY:
                         "normalization_completed": True,
                         "contradictions": [],
                     },
+                    "source_records": [
+                        {"title": "Stripe", "url": "https://stripe.com"}
+                    ],
                     "supplier_execution": [],
                     "provenance": {
                         "engine_version": "company-profile-procurement/0.1.0"
@@ -2789,6 +2792,9 @@ def sample_company_profile_procurement() -> dict[str, Any]:
                 "contradictions": [],
                 "source_urls": ["https://stripe.com"],
             },
+            "source_records": [
+                {"title": "Stripe", "url": "https://stripe.com"}
+            ],
             "supplier_execution": [
                 {"supplier": "tavily-x402", "status": "FULFILLED"},
                 {"supplier": "blockrun-x402", "status": "FULFILLED"},
