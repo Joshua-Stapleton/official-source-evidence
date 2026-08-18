@@ -7,6 +7,9 @@ are in [`FORM_D_EXPERIMENT.md`](FORM_D_EXPERIMENT.md).
 
 Paid candidates:
 
+- `POST /v1/procure/company-profile` at `$0.25` USDC. It purchases bounded
+  retrieval and schema-constrained normalization from pinned x402 suppliers,
+  with at most `$0.02` expected supplier cost per fulfilled request.
 - `POST /v1/web/source-snapshot` at `$0.03` USDC per fulfilled call.
 - `POST /v1/monitors/source-change` at `$1.00` USDC per 30-day monitor.
 - `POST /v1/monitors/source-change-portfolio` at `$9.00` USDC per 30-day
@@ -22,6 +25,16 @@ Paid candidates:
 The PFAS and grid lead endpoints remain available for prior API-key experiments, but their x402 routes return `410 RETIRED_WEDGE` and are not promoted in the agent manifest.
 
 ## Product Boundaries
+
+The company-profile procurement route is a brokered execution experiment. It
+uses Tavily only for bounded source discovery and BlockRun only for
+schema-constrained normalization, then returns derived fields, source links,
+contradictions, supplier settlement provenance, hashes, and a signed receipt.
+It never returns raw supplier payloads as a pass-through. Supplier endpoint,
+recipient, Base USDC asset, and maximum quote are pinned. Retrieval success with
+normalization failure returns an explicit partial result instead of invented
+fields. The pre-registered hypothesis and gates are in
+[`PROCUREMENT_EXPERIMENT.md`](PROCUREMENT_EXPERIMENT.md).
 
 The public-source snapshot endpoint fetches one public HTTPS HTML, JSON, XML, or
 plain-text resource and returns bounded normalized text, optional literal-match
@@ -72,6 +85,12 @@ and only a successful dossier response is settled. If assembly fails, the
 customer is not charged; any uncertain supplier spend remains counted against
 the daily supplier cap.
 
+The procurement route uses the same payment-first boundary with an independent
+supplier-spend ledger and cap. It binds the inbound proof to the canonical
+request before supplier execution, returns a stored completed result on an
+identical retry without buying again, and rejects proof reuse with another
+request.
+
 For directory and uptime monitoring, an empty unauthenticated `POST` is a
 supported probe for all paid routes. It uses the route's published Bazaar
 example request and returns the normal 402 challenge. A literal `{}`, malformed
@@ -99,6 +118,7 @@ uvicorn autonomous_data_api.app:app --host 127.0.0.1 --port 8765 --reload
 
 Useful local URLs:
 
+- `http://127.0.0.1:8765/v1/procure/company-profile/sample`
 - `http://127.0.0.1:8765/docs`
 - `http://127.0.0.1:8765/.well-known/agent-service.json`
 - `http://127.0.0.1:8765/v1/experiments/status`
@@ -183,6 +203,15 @@ export AUTONOMOUS_GTM_DOSSIER_ENABLED=1
 export AUTONOMOUS_X402_FORM_D_DOSSIER_PRICE='$0.25'
 export AUTONOMOUS_GTM_DOSSIER_SUPPLIER_DAILY_CAP_USD='0.05'
 export AUTONOMOUS_SUPPLIER_WALLET_PRIVATE_KEY='0xDedicatedSupplierWalletKey'
+```
+
+The procurement experiment reuses that dedicated low-balance supplier wallet
+with a separate daily cap:
+
+```bash
+export AUTONOMOUS_PROCUREMENT_ENABLED=1
+export AUTONOMOUS_X402_COMPANY_PROFILE_PRICE='$0.25'
+export AUTONOMOUS_PROCUREMENT_SUPPLIER_DAILY_CAP_USD='0.20'
 ```
 
 The seller app never needs the receiving wallet's private key. The CDP secret authenticates facilitator verify/settle calls; it is not a treasury key.

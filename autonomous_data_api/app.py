@@ -54,8 +54,8 @@ from autonomous_data_api.evidence import (
     FormDFundingLeadsRequest,
     OfacExactRequest,
     OfacPreflightRequest,
-    PreparedResult,
     PortfolioMonitorCreateRequest,
+    PreparedResult,
     PublicSourceSnapshotRequest,
     SecDeltaRequest,
     SecSignalRequest,
@@ -66,6 +66,11 @@ from autonomous_data_api.monitors import (
     MonitorError,
     WebMonitorService,
     fetch_public_source,
+)
+from autonomous_data_api.procurement import (
+    CompanyProfileProcurementRequest,
+    ProcurementBrokerError,
+    ProcurementBrokerService,
 )
 from autonomous_data_api.suppliers import DossierSupplierError, FundingDossierService
 
@@ -82,10 +87,9 @@ X402_OFAC_PREFLIGHT_PRICE = os.getenv("AUTONOMOUS_X402_OFAC_PREFLIGHT_PRICE", "$
 X402_FORM_D_PRICE = os.getenv("AUTONOMOUS_X402_FORM_D_PRICE", "$0.05")
 X402_FORM_D_DOSSIER_PRICE = os.getenv("AUTONOMOUS_X402_FORM_D_DOSSIER_PRICE", "$0.25")
 X402_SOURCE_WATCH_PRICE = os.getenv("AUTONOMOUS_X402_SOURCE_WATCH_PRICE", "$1.00")
-X402_PORTFOLIO_WATCH_PRICE = os.getenv(
-    "AUTONOMOUS_X402_PORTFOLIO_WATCH_PRICE", "$9.00"
-)
+X402_PORTFOLIO_WATCH_PRICE = os.getenv("AUTONOMOUS_X402_PORTFOLIO_WATCH_PRICE", "$9.00")
 X402_SOURCE_SNAPSHOT_PRICE = os.getenv("AUTONOMOUS_X402_SOURCE_SNAPSHOT_PRICE", "$0.03")
+X402_COMPANY_PROFILE_PRICE = os.getenv("AUTONOMOUS_X402_COMPANY_PROFILE_PRICE", "$0.25")
 CONVERSION_EXPERIMENT_START_UTC = os.getenv(
     "AUTONOMOUS_CONVERSION_EXPERIMENT_START_UTC", ""
 ).strip()
@@ -98,6 +102,9 @@ try:
     )
     GTM_DOSSIER_SUPPLIER_DAILY_CAP_USD = Decimal(
         os.getenv("AUTONOMOUS_GTM_DOSSIER_SUPPLIER_DAILY_CAP_USD", "0.05")
+    )
+    PROCUREMENT_SUPPLIER_DAILY_CAP_USD = Decimal(
+        os.getenv("AUTONOMOUS_PROCUREMENT_SUPPLIER_DAILY_CAP_USD", "0.20")
     )
 except InvalidOperation as exc:
     raise RuntimeError("Revenue and supplier daily caps must be numeric") from exc
@@ -183,6 +190,10 @@ SOURCE_SNAPSHOT_PROBE_PAYLOAD = {
     "query": "enforcement",
     "max_characters": 12000,
 }
+COMPANY_PROFILE_PROBE_PAYLOAD = {
+    "company_name": "Stripe",
+    "domain": "stripe.com",
+}
 
 
 def load_cdp_api_key_secret() -> str:
@@ -233,6 +244,15 @@ funding_dossier_service = FundingDossierService(
 GTM_DOSSIER_READY = (
     GTM_DOSSIER_ENABLED and funding_dossier_service.configured and X402_REVENUE_READY
 )
+PROCUREMENT_ENABLED = os.getenv("AUTONOMOUS_PROCUREMENT_ENABLED", "0") == "1"
+procurement_broker_service = ProcurementBrokerService(
+    evidence_service,
+    private_key=os.getenv("AUTONOMOUS_SUPPLIER_WALLET_PRIVATE_KEY", ""),
+    daily_cap_usd=PROCUREMENT_SUPPLIER_DAILY_CAP_USD,
+)
+PROCUREMENT_READY = (
+    PROCUREMENT_ENABLED and procurement_broker_service.configured and X402_REVENUE_READY
+)
 
 
 async def refresh_ofac_sources() -> None:
@@ -281,12 +301,13 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(
-    title="Agent Evidence and Source Watch API",
-    version="0.8.0",
+    title="Agent Procurement and Evidence API",
+    version="0.9.0",
     description=(
-        "One-shot public-source extraction, long-running source-change monitoring, "
-        "pay-per-call SEC Form D GTM signals, source-hashed EDGAR filing deltas, "
-        "and exact OFAC identifier evidence for autonomous agents. No accounts or API keys. "
+        "Brokered machine-service procurement, one-shot public-source extraction, "
+        "long-running source-change monitoring, SEC signals, source-hashed EDGAR "
+        "filing deltas, and exact OFAC identifier evidence for autonomous agents. "
+        "No accounts or API keys. "
         "No investment advice, sanctions clearance, compliance determination, or legal advice."
     ),
     contact={"name": "Regulavita", "email": "joshua@regulavita.com"},
@@ -1228,6 +1249,120 @@ if GTM_DOSSIER_READY:
             ),
         ),
     )
+if PROCUREMENT_READY:
+    x402_routes["POST /v1/procure/company-profile"] = RouteConfig(
+        accepts=[
+            PaymentOption(
+                scheme="exact",
+                pay_to=X402_PAY_TO,
+                price=X402_COMPANY_PROFILE_PRICE,
+                network=X402_NETWORK,
+            )
+        ],
+        mime_type="application/json",
+        description=(
+            "Procure a current company profile from a pinned search supplier and "
+            "a pinned schema-normalization supplier. One call handles upstream "
+            "x402 payments, returns bounded derived fields and source links, "
+            "surfaces contradictions or partial fulfillment, and signs the result."
+        ),
+        service_name="Company Profile Procurement Broker",
+        tags=[
+            "procurement",
+            "company-profile",
+            "supplier-routing",
+            "service-orchestration",
+            "company-research",
+            "source-provenance",
+            "signed-receipt",
+            "x402",
+        ],
+        icon_url=SERVICE_ICON_URL,
+        extensions=get_discovery_extension(
+            method="POST",
+            input=COMPANY_PROFILE_PROBE_PAYLOAD,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "company_name": {
+                        "type": "string",
+                        "minLength": 2,
+                        "maxLength": 200,
+                        "description": "Legal or common company name.",
+                    },
+                    "domain": {
+                        "type": "string",
+                        "minLength": 4,
+                        "maxLength": 253,
+                        "description": "Bare public company domain without scheme or path.",
+                    },
+                    "ticker": {
+                        "type": "string",
+                        "pattern": "^[A-Z0-9.-]{1,10}$",
+                        "description": "Optional public-company ticker.",
+                    },
+                },
+                "required": ["company_name", "domain"],
+                "additionalProperties": False,
+            },
+            output=OutputConfig(
+                example={
+                    "request_id": "company_profile_procurement_example",
+                    "product": "PROCURED_COMPANY_PROFILE",
+                    "decision": "COMPANY_PROFILE_PROCURED",
+                    "profile": {
+                        "company_name": "Stripe",
+                        "domain": "stripe.com",
+                        "ticker": None,
+                        "summary": "Payments infrastructure company.",
+                        "industry": "Financial technology",
+                        "products_services": ["Payments infrastructure"],
+                        "headquarters": "San Francisco, California, United States",
+                        "source_urls": ["https://stripe.com"],
+                    },
+                    "reconciliation": {
+                        "retrieval_completed": True,
+                        "normalization_completed": True,
+                        "contradictions": [],
+                    },
+                    "supplier_execution": [],
+                    "provenance": {
+                        "engine_version": "company-profile-procurement/0.1.0"
+                    },
+                    "receipt": {"algorithm": "Ed25519"},
+                },
+                schema={
+                    "type": "object",
+                    "required": [
+                        "request_id",
+                        "product",
+                        "decision",
+                        "profile",
+                        "source_records",
+                        "supplier_execution",
+                        "provenance",
+                        "receipt",
+                    ],
+                    "properties": {
+                        "request_id": {"type": "string"},
+                        "product": {"const": "PROCURED_COMPANY_PROFILE"},
+                        "decision": {
+                            "enum": [
+                                "COMPANY_PROFILE_PROCURED",
+                                "PARTIAL_COMPANY_PROFILE_PROCURED",
+                            ]
+                        },
+                        "profile": {"type": "object"},
+                        "source_records": {"type": "array"},
+                        "reconciliation": {"type": "object"},
+                        "supplier_execution": {"type": "array"},
+                        "provenance": {"type": "object"},
+                        "receipt": {"type": "object"},
+                    },
+                },
+            ),
+        ),
+    )
 app.add_middleware(PaymentMiddlewareASGI, routes=x402_routes, server=x402_server)
 
 
@@ -1445,8 +1580,31 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
             OFAC_PROBE_PAYLOAD,
         ),
     }
-    POST_PAYMENT_ROUTES: ClassVar[dict[str, str]] = {
-        "/v1/gtm/form-d-company-dossier": X402_FORM_D_DOSSIER_PRICE,
+    POST_PAYMENT_ROUTES: ClassVar[
+        dict[str, tuple[type[BaseModel], str, dict[str, Any]]]
+    ] = {
+        **(
+            {
+                "/v1/gtm/form-d-company-dossier": (
+                    FormDCompanyDossierRequest,
+                    X402_FORM_D_DOSSIER_PRICE,
+                    FORM_D_DOSSIER_PROBE_PAYLOAD,
+                )
+            }
+            if GTM_DOSSIER_READY
+            else {}
+        ),
+        **(
+            {
+                "/v1/procure/company-profile": (
+                    CompanyProfileProcurementRequest,
+                    X402_COMPANY_PROFILE_PRICE,
+                    COMPANY_PROFILE_PROBE_PAYLOAD,
+                )
+            }
+            if PROCUREMENT_READY
+            else {}
+        ),
     }
 
     def __init__(self, app: Any, service: EvidenceService) -> None:
@@ -1485,10 +1643,60 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
         return True
 
     async def _dispatch_post_payment_route(
-        self, request: Request, call_next: Any, quoted_price: str
+        self,
+        request: Request,
+        call_next: Any,
+        model_class: type[BaseModel],
+        quoted_price: str,
+        probe_payload: dict[str, Any],
     ) -> Response:
         started = time.monotonic()
+        if os.getenv("AUTONOMOUS_EVIDENCE_ENABLED", "1") != "1":
+            return JSONResponse(
+                status_code=503,
+                content={"error": {"code": "SERVICE_DISABLED"}},
+            )
+        if not await self._within_rate_limit(request):
+            return JSONResponse(
+                status_code=429,
+                headers={"Retry-After": "60"},
+                content={"error": {"code": "RATE_LIMITED"}},
+            )
+        content_length = request.headers.get("content-length")
+        if content_length and content_length.isdigit() and int(content_length) > 8192:
+            return JSONResponse(
+                status_code=413,
+                content={"error": {"code": "REQUEST_TOO_LARGE"}},
+            )
         body = await request.body()
+        if not body:
+            payload = probe_payload
+        else:
+            try:
+                payload = json.loads(body)
+            except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": {"code": "INVALID_JSON"}},
+                )
+        if len(json.dumps(payload, separators=(",", ":")).encode("utf-8")) > 8192:
+            return JSONResponse(
+                status_code=413,
+                content={"error": {"code": "REQUEST_TOO_LARGE"}},
+            )
+        try:
+            validated = model_class.model_validate(payload)
+        except ValidationError as exc:
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "error": {
+                        "code": "INVALID_INPUT",
+                        "detail": exc.errors(include_url=False, include_context=False),
+                    }
+                },
+            )
+        request.state.evidence_validated = validated
         response = await call_next(request)
         payment_signature = request.headers.get(
             "payment-signature"
@@ -1497,7 +1705,13 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
             request.state, "evidence_prepared", None
         )
         if prepared is None:
-            request_hash = hashlib.sha256(body or b"{}").hexdigest()
+            request_hash = hashlib.sha256(
+                json.dumps(
+                    validated.model_dump(mode="json"),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
             prepared = PreparedResult(
                 request_id=f"post_payment_{request_hash[:24]}",
                 product="post_payment_quote",
@@ -1574,10 +1788,10 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
         if PUBLIC_SCHEME in {"http", "https"}:
             request.scope["scheme"] = PUBLIC_SCHEME
         route = self.ROUTES.get(request.url.path)
-        post_payment_price = self.POST_PAYMENT_ROUTES.get(request.url.path)
-        if request.method == "POST" and post_payment_price is not None:
+        post_payment_route = self.POST_PAYMENT_ROUTES.get(request.url.path)
+        if request.method == "POST" and post_payment_route is not None:
             return await self._dispatch_post_payment_route(
-                request, call_next, post_payment_price
+                request, call_next, *post_payment_route
             )
         if request.method != "POST" or route is None:
             return await call_next(request)
@@ -1782,21 +1996,25 @@ class MainnetRevenueCapMiddleware(BaseHTTPMiddleware):
         self.daily_cap = daily_cap
         self.route_prices = route_prices
         self.lock = asyncio.Lock()
+        self.reserved: dict[str, Decimal] = {}
 
     async def dispatch(self, request: Request, call_next: Any):
         price = self.route_prices.get((request.method, request.url.path))
         if self.network != "eip155:8453" or self.daily_cap <= 0 or price is None:
             return await call_next(request)
 
+        reservation_day: str | None = None
         async with self.lock:
             now = datetime.now(timezone.utc)
             day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            reservation_day = day_start.date().isoformat()
             fulfilled = await run_in_threadpool(
                 self.service.fulfilled_revenue_since,
                 day_start.isoformat(),
                 self.network,
             )
-            if fulfilled + price > self.daily_cap:
+            reserved = self.reserved.get(reservation_day, Decimal(0))
+            if fulfilled + reserved + price > self.daily_cap:
                 next_day = day_start + timedelta(days=1)
                 retry_after = max(1, int((next_day - now).total_seconds()))
                 return JSONResponse(
@@ -1809,7 +2027,16 @@ class MainnetRevenueCapMiddleware(BaseHTTPMiddleware):
                         }
                     },
                 )
+            self.reserved[reservation_day] = reserved + price
+        try:
             return await call_next(request)
+        finally:
+            async with self.lock:
+                remaining = self.reserved.get(reservation_day, Decimal(0)) - price
+                if remaining > 0:
+                    self.reserved[reservation_day] = remaining
+                else:
+                    self.reserved.pop(reservation_day, None)
 
 
 def price_decimal(value: str) -> Decimal:
@@ -1838,6 +2065,15 @@ app.add_middleware(
                 )
             }
             if GTM_DOSSIER_READY
+            else {}
+        ),
+        **(
+            {
+                ("POST", "/v1/procure/company-profile"): price_decimal(
+                    X402_COMPANY_PROFILE_PRICE
+                )
+            }
+            if PROCUREMENT_READY
             else {}
         ),
         ("POST", "/v1/ofac/payment-preflight"): price_decimal(
@@ -1897,6 +2133,11 @@ def health() -> dict[str, Any]:
                     if GTM_DOSSIER_READY
                     else {}
                 ),
+                **(
+                    {"company_profile_procurement": X402_COMPANY_PROFILE_PRICE}
+                    if PROCUREMENT_READY
+                    else {}
+                ),
                 "ofac_preflight": X402_OFAC_PREFLIGHT_PRICE,
                 "sec_signal": X402_SEC_SIGNAL_PRICE,
                 "ofac_exact": X402_OFAC_PRICE,
@@ -1923,6 +2164,16 @@ def health() -> dict[str, Any]:
             "supplier_daily_cap_usd": f"{GTM_DOSSIER_SUPPLIER_DAILY_CAP_USD:.2f}",
             "supplier_wallet_configured": funding_dossier_service.configured,
         },
+        "company_profile_procurement": {
+            "enabled": PROCUREMENT_READY,
+            "suppliers": [
+                "Tavily Search advanced via x402",
+                "BlockRun model gateway via x402",
+            ],
+            "maximum_supplier_cost_per_call_usd": "0.02",
+            "supplier_daily_cap_usd": f"{PROCUREMENT_SUPPLIER_DAILY_CAP_USD:.2f}",
+            "supplier_wallet_configured": procurement_broker_service.configured,
+        },
         "source_watch": monitor_service.public_stats(),
         "marketplace": {"the402": the402_provider.public_status()},
     }
@@ -1937,7 +2188,7 @@ def service_home() -> FileResponse:
 def service_index() -> dict[str, str]:
     base_url = PUBLIC_BASE_URL.rstrip("/")
     return {
-        "name": "Agent Evidence and Source Watch API",
+        "name": "Agent Procurement and Evidence API",
         "health": f"{base_url}/health",
         "docs": f"{base_url}/docs",
         "manifest": f"{base_url}/.well-known/agent-service.json",
@@ -1975,6 +2226,7 @@ def sitemap() -> Response:
         "/",
         "/docs",
         "/openapi.json",
+        "/v1/procure/company-profile/sample",
         "/v1/web/source-snapshot/sample",
         "/v1/monitors/source-change/sample",
         "/v1/monitors/source-change-portfolio/sample",
@@ -2002,11 +2254,12 @@ def llms_txt() -> PlainTextResponse:
         else ""
     )
     return PlainTextResponse(
-        f"""# Agent Evidence and Source Watch API
+        f"""# Agent Procurement and Evidence API
 
-Long-running monitoring jobs and pay-per-call official-source evidence for autonomous agents. No account or API key.
+Brokered machine-service procurement, long-running monitoring jobs, and pay-per-call official-source evidence for autonomous agents. No account or API key.
 
 ## Paid endpoints
+- POST {base_url}/v1/procure/company-profile - $0.25 USDC. Procure bounded current company research and schema-constrained normalization from two pinned x402 suppliers. Returns derived fields, source links, contradictions, supplier settlements, partial-failure state, response hashes, and a signed receipt.
 - POST {base_url}/v1/web/source-snapshot - $0.03 USDC. Fetch one public HTTPS HTML, JSON, XML, or text source as normalized agent-ready text with optional literal excerpts, a content hash, and an Ed25519-signed receipt.
 - POST {base_url}/v1/monitors/source-change - $1.00 USDC. Monitor one public HTTPS text, HTML, JSON, or XML source every six hours for 30 days. Private polling and optional HMAC-signed change webhooks are included.
 - POST {base_url}/v1/monitors/source-change-portfolio - $9.00 USDC. Monitor 2-10 public HTTPS sources every six hours for 30 days. One payment returns private polling tokens and optional signed webhooks for every source.
@@ -2020,6 +2273,8 @@ Long-running monitoring jobs and pay-per-call official-source evidence for auton
 - OpenAPI: {base_url}/openapi.json
 - Agent manifest: {base_url}/.well-known/agent-service.json
 - Interactive docs: {base_url}/docs
+- Company Profile Procurement sample: {base_url}/v1/procure/company-profile/sample
+- Company Profile Procurement free quote: {base_url}/v1/procure/company-profile/quote
 - Public Source Snapshot sample: {base_url}/v1/web/source-snapshot/sample
 - Source Watch sample: {base_url}/v1/monitors/source-change/sample
 - Portfolio Watch sample: {base_url}/v1/monitors/source-change-portfolio/sample
@@ -2041,11 +2296,11 @@ Source Watch supports public HTTPS sources only and does not render JavaScript o
 def agent_manifest() -> dict[str, Any]:
     base_url = os.getenv("AUTONOMOUS_API_BASE_URL", "http://localhost:8765").rstrip("/")
     return {
-        "name": "Agent Evidence and Source Watch API",
+        "name": "Agent Procurement and Evidence API",
         "description": (
-            "One-shot public-source extraction and long-running source-change "
-            "monitors plus pay-per-call SEC Form D GTM signals, OFAC payment "
-            "preflight, SEC filing decisions, and signed receipts."
+            "Brokered company-profile procurement, one-shot public-source "
+            "extraction, long-running source-change monitors, SEC signals, OFAC "
+            "payment preflight, and signed receipts."
         ),
         "contact": "joshua@regulavita.com",
         "icon_url": SERVICE_ICON_URL,
@@ -2063,6 +2318,11 @@ def agent_manifest() -> dict[str, Any]:
                     if GTM_DOSSIER_READY
                     else {}
                 ),
+                **(
+                    {"/v1/procure/company-profile": X402_COMPANY_PROFILE_PRICE}
+                    if PROCUREMENT_READY
+                    else {}
+                ),
                 "/v1/ofac/payment-preflight": X402_OFAC_PREFLIGHT_PRICE,
                 "/v1/sec/filing-change-signal": X402_SEC_SIGNAL_PRICE,
                 "/v1/sec/filing-trigger-delta": X402_SEC_PRICE,
@@ -2078,6 +2338,7 @@ def agent_manifest() -> dict[str, Any]:
         "openapi_url": f"{base_url}/openapi.json",
         "llms_url": f"{base_url}/llms.txt",
         "sample_endpoints": [
+            f"{base_url}/v1/procure/company-profile/sample",
             f"{base_url}/v1/web/source-snapshot/sample",
             f"{base_url}/v1/monitors/source-change/sample",
             f"{base_url}/v1/monitors/source-change-portfolio/sample",
@@ -2086,6 +2347,7 @@ def agent_manifest() -> dict[str, Any]:
             f"{base_url}/v1/ofac/sample",
         ],
         "agent_paid_endpoints": [
+            *([f"{base_url}/v1/procure/company-profile"] if PROCUREMENT_READY else []),
             f"{base_url}/v1/web/source-snapshot",
             f"{base_url}/v1/monitors/source-change",
             f"{base_url}/v1/monitors/source-change-portfolio",
@@ -2103,6 +2365,8 @@ def agent_manifest() -> dict[str, Any]:
         "status_endpoint": f"{base_url}/v1/experiments/status",
         "source_watch_stats_endpoint": f"{base_url}/v1/monitors/stats",
         "boundaries": [
+            "Procurement returns derived fields and source links, never raw supplier payloads.",
+            "Supplier endpoints, Base USDC, exact scheme, and maximum prices are pinned; BlockRun's recipient is pinned, while Tavily supplies a validated request-scoped recipient.",
             "Source Watch supports public HTTPS text-like sources only.",
             "Form D is an issuer-filed notice, not proof of the total funding raised.",
             "No investment advice or materiality opinion.",
@@ -2471,6 +2735,131 @@ def form_d_funding_leads(
     return prepared.result
 
 
+@app.post("/v1/procure/company-profile/quote")
+def quote_company_profile_procurement(
+    payload: CompanyProfileProcurementRequest,
+) -> dict[str, Any]:
+    return {
+        "available": PROCUREMENT_READY,
+        "path": "/v1/procure/company-profile",
+        "price": X402_COMPANY_PROFILE_PRICE,
+        "currency": "USDC",
+        "network": X402_NETWORK,
+        "input": payload.model_dump(mode="json"),
+        "supplier_plan": [
+            {
+                "capability": "bounded current web retrieval",
+                "supplier": "Tavily Search advanced via x402",
+                "maximum_cost_usd": "0.01",
+            },
+            {
+                "capability": "schema-constrained normalization",
+                "supplier": "BlockRun model gateway via x402",
+                "maximum_cost_usd": "0.01",
+            },
+        ],
+        "maximum_supplier_cost_usd": "0.02",
+        "partial_result_policy": (
+            "If retrieval succeeds but normalization fails, return bounded source "
+            "records with an explicit partial status."
+        ),
+    }
+
+
+@app.get("/v1/procure/company-profile/sample")
+def sample_company_profile_procurement() -> dict[str, Any]:
+    return {
+        "sample": True,
+        "request": COMPANY_PROFILE_PROBE_PAYLOAD,
+        "quote_url": f"{PUBLIC_BASE_URL.rstrip('/')}/v1/procure/company-profile/quote",
+        "paid_path": "/v1/procure/company-profile",
+        "price": X402_COMPANY_PROFILE_PRICE,
+        "example_result": {
+            "product": "PROCURED_COMPANY_PROFILE",
+            "decision": "COMPANY_PROFILE_PROCURED",
+            "profile": {
+                "company_name": "Stripe",
+                "domain": "stripe.com",
+                "ticker": None,
+                "summary": "Payments infrastructure company.",
+                "industry": "Financial technology",
+                "products_services": ["Payments infrastructure"],
+                "headquarters": "San Francisco, California, United States",
+                "field_confidence": {"domain": 1.0},
+                "contradictions": [],
+                "source_urls": ["https://stripe.com"],
+            },
+            "supplier_execution": [
+                {"supplier": "tavily-x402", "status": "FULFILLED"},
+                {"supplier": "blockrun-x402", "status": "FULFILLED"},
+            ],
+            "receipt": {"algorithm": "Ed25519"},
+        },
+    }
+
+
+@app.post(
+    "/v1/procure/company-profile",
+    include_in_schema=PROCUREMENT_READY,
+)
+async def procure_company_profile(
+    request: Request,
+    payload: CompanyProfileProcurementRequest,
+) -> dict[str, Any]:
+    if not PROCUREMENT_READY:
+        raise HTTPException(
+            status_code=503,
+            detail="The company-profile procurement experiment is not activated",
+        )
+    payment_signature = request.headers.get("payment-signature") or request.headers.get(
+        "x-payment"
+    )
+    if not payment_signature:
+        raise HTTPException(
+            status_code=500, detail="Verified payment proof unavailable"
+        )
+    request_hash = hashlib.sha256(
+        json.dumps(
+            payload.model_dump(mode="json"),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    if not await run_in_threadpool(
+        evidence_service.bind_payment_request,
+        payment_signature,
+        request_hash,
+        request.url.path,
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Payment proof is already bound to a different request",
+        )
+    try:
+        prepared, direct_cost = await procurement_broker_service.build(
+            payload, payment_signature
+        )
+    except ProcurementBrokerError as exc:
+        request.state.evidence_direct_cost_usd = exc.direct_cost_usd
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "detail": exc.detail},
+        ) from exc
+    request.state.evidence_prepared = prepared
+    request.state.evidence_direct_cost_usd = direct_cost
+    if not await run_in_threadpool(
+        evidence_service.bind_payment,
+        payment_signature,
+        prepared,
+        request.url.path,
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Payment proof is already bound to a different request",
+        )
+    return prepared.result
+
+
 @app.post(
     "/v1/gtm/form-d-company-dossier",
     include_in_schema=GTM_DOSSIER_READY,
@@ -2605,8 +2994,9 @@ def evidence_experiment_status() -> dict[str, Any]:
 @app.get("/v1/summary")
 def summary() -> dict[str, Any]:
     return {
-        "service": "Agent Evidence and Source Watch API",
+        "service": "Agent Procurement and Evidence API",
         "products": [
+            *(["/v1/procure/company-profile"] if PROCUREMENT_READY else []),
             "/v1/monitors/source-change",
             "/v1/monitors/source-change-portfolio",
             "/v1/gtm/form-d-funding-leads",
@@ -2691,7 +3081,10 @@ def custom_openapi() -> dict[str, Any]:
         "MonitorBearer"
     ] = {"type": "http", "scheme": "bearer"}
     schema["info"]["x-guidance"] = (
-        "Use POST /v1/web/source-snapshot for a one-shot normalized public-source "
+        "Use POST /v1/procure/company-profile when an agent wants one stable "
+        "contract to select, pay, and normalize machine suppliers. Inspect the "
+        "free quote route before payment. Use POST /v1/web/source-snapshot for a "
+        "one-shot normalized public-source "
         "extract with a content hash and signed receipt. Upgrade to POST "
         "/v1/monitors/source-change to buy a 30-day, six-hour-cadence "
         "monitor for one public HTTPS source, with private polling and optional "
@@ -2775,6 +3168,16 @@ def custom_openapi() -> dict[str, Any]:
             ),
         },
     }
+    if PROCUREMENT_READY:
+        paid_operations["/v1/procure/company-profile"] = {
+            "price": f"{price_decimal(X402_COMPANY_PROFILE_PRICE):.6f}",
+            "example": COMPANY_PROFILE_PROBE_PAYLOAD,
+            "description": (
+                "Procure bounded company retrieval and schema-constrained "
+                "normalization from pinned x402 suppliers, with source links, "
+                "contradictions, partial-failure state, hashes, and a signed receipt."
+            ),
+        }
     if GTM_DOSSIER_READY:
         paid_operations["/v1/gtm/form-d-company-dossier"] = {
             "price": f"{price_decimal(X402_FORM_D_DOSSIER_PRICE):.6f}",

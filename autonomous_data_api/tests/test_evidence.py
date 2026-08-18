@@ -204,6 +204,135 @@ def test_ofac_no_match_never_claims_clearance(tmp_path, monkeypatch):
     assert '"cleared"' not in serialized
 
 
+def test_payment_intent_binds_before_procurement_and_finalizes_once(
+    tmp_path, monkeypatch
+):
+    evidence = service(tmp_path, monkeypatch)
+    request_hash = "a" * 64
+    route = "/v1/procure/company-profile"
+    assert evidence.bind_payment_request("procurement-proof", request_hash, route)
+    assert evidence.bind_payment_request("procurement-proof", request_hash, route)
+    assert not evidence.bind_payment_request("procurement-proof", "b" * 64, route)
+
+    prepared = evidence._store_prepared(
+        "company_profile_procurement",
+        request_hash,
+        "c" * 64,
+        {"product": "PROCURED_COMPANY_PROFILE"},
+    )
+    assert evidence.bind_payment("procurement-proof", prepared, route)
+    assert evidence.bind_payment("procurement-proof", prepared, route)
+
+    changed_result = PreparedResult(
+        request_id="company_profile_procurement_changed",
+        product="company_profile_procurement",
+        request_hash=request_hash,
+        source_bundle_hash="e" * 64,
+        result_hash="f" * 64,
+        result={},
+    )
+    assert not evidence.bind_payment("procurement-proof", changed_result, route)
+
+
+def test_company_profile_procurement_returns_derived_signed_result(
+    tmp_path, monkeypatch
+):
+    evidence = service(tmp_path, monkeypatch)
+    prepared = evidence.prepare_company_profile_procurement(
+        {"company_name": "Stripe", "domain": "stripe.com", "ticker": None},
+        [
+            {
+                "supplier": "tavily-x402",
+                "endpoint": "https://x402.tavily.com/search",
+                "status": "FULFILLED",
+                "price_usd": "0.01",
+                "settlement_transaction": "0xsearch",
+                "payload": {
+                    "sources": [
+                        {
+                            "title": "Stripe",
+                            "url": "https://stripe.com",
+                            "snippet": "Payments infrastructure.",
+                            "score": 0.9,
+                        }
+                    ]
+                },
+            },
+            {
+                "supplier": "blockrun-x402",
+                "endpoint": "https://blockrun.ai/api/v1/chat/completions",
+                "status": "FULFILLED",
+                "price_usd": "0.002",
+                "settlement_transaction": "0xmodel",
+                "payload": {
+                    "company_name": "Stripe",
+                    "domain": "stripe.com",
+                    "ticker": None,
+                    "summary": "Payments infrastructure company.",
+                    "industry": "Financial technology",
+                    "products_services": ["Payments infrastructure"],
+                    "headquarters": "San Francisco, California, United States",
+                    "field_confidence": {"domain": 1.0},
+                    "contradictions": [],
+                    "source_urls": [
+                        "https://stripe.com",
+                        "https://not-in-retrieval.example",
+                    ],
+                },
+            },
+        ],
+    )
+
+    assert prepared.result["decision"] == "COMPANY_PROFILE_PROCURED"
+    assert prepared.result["profile"]["summary"] == "Payments infrastructure company."
+    assert prepared.result["profile"]["source_urls"] == ["https://stripe.com"]
+    assert prepared.result["reconciliation"]["normalization_completed"] is True
+    assert prepared.result["receipt"]["algorithm"] == "Ed25519"
+    serialized = json.dumps(prepared.result)
+    assert "choices" not in serialized
+    assert "raw_content" not in serialized
+    assert "Payments infrastructure." not in serialized
+
+
+def test_company_profile_procurement_marks_retrieval_only_as_partial(
+    tmp_path, monkeypatch
+):
+    evidence = service(tmp_path, monkeypatch)
+    prepared = evidence.prepare_company_profile_procurement(
+        {"company_name": "Example", "domain": "example.com", "ticker": None},
+        [
+            {
+                "supplier": "tavily-x402",
+                "endpoint": "https://x402.tavily.com/search",
+                "status": "FULFILLED",
+                "price_usd": "0.01",
+                "payload": {
+                    "sources": [
+                        {
+                            "title": "Example",
+                            "url": "https://example.com",
+                            "snippet": "Example source.",
+                            "score": 0.8,
+                        }
+                    ]
+                },
+            },
+            {
+                "supplier": "blockrun-x402",
+                "endpoint": "https://blockrun.ai/api/v1/chat/completions",
+                "status": "FAILED",
+                "price_usd": "0",
+                "error_code": "SUPPLIER_UNAVAILABLE",
+            },
+        ],
+    )
+
+    assert prepared.result["decision"] == "PARTIAL_COMPANY_PROFILE_PROCURED"
+    assert prepared.result["profile"]["company_name"] == "Example"
+    assert prepared.result["reconciliation"]["retrieval_completed"] is True
+    assert prepared.result["reconciliation"]["normalization_completed"] is False
+
+
 def test_ofac_preflight_is_compact_unsigned_and_never_claims_clearance(
     tmp_path, monkeypatch
 ):

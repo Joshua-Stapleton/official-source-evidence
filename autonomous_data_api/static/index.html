@@ -3,15 +3,15 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Source Change Watch and Official Evidence APIs for Agents</title>
-    <meta name="description" content="One-shot public source extraction, thirty-day monitoring, SEC GTM signals, filing checks, and OFAC evidence for autonomous agents, payable with no account or API key.">
+    <title>Capability Procurement and Evidence APIs for Agents</title>
+    <meta name="description" content="Brokered company research, public source extraction, thirty-day monitoring, SEC signals, and OFAC evidence for autonomous agents, payable with no account or API key.">
     <meta name="robots" content="index,follow">
     <link rel="canonical" href="https://evidence.regulavita.com/">
     <link rel="icon" href="/favicon.ico">
     <link rel="alternate" type="application/json" href="/.well-known/agent-service.json" title="Agent service manifest">
     <meta property="og:type" content="website">
-    <meta property="og:title" content="Agent Evidence and Source Watch">
-    <meta property="og:description" content="One-shot source extraction, long-running monitors, and official SEC and OFAC evidence, payable by autonomous agents over x402.">
+    <meta property="og:title" content="Agent Procurement and Evidence">
+    <meta property="og:description" content="Procure and reconcile machine services, run long-lived monitors, or buy official-source evidence over x402.">
     <meta property="og:url" content="https://evidence.regulavita.com/">
     <meta property="og:image" content="https://evidence.regulavita.com/icon.png">
     <meta name="twitter:card" content="summary">
@@ -19,13 +19,14 @@
       {
         "@context": "https://schema.org",
         "@type": "SoftwareApplication",
-        "name": "Agent Evidence and Source Watch",
+        "name": "Agent Procurement and Evidence",
         "applicationCategory": "DeveloperApplication",
-        "description": "One-shot public source extraction, long-running monitoring, official SEC Form D signals, filing checks, and OFAC evidence for autonomous agents.",
+        "description": "Brokered machine-service procurement, public source extraction, long-running monitoring, SEC signals, and OFAC evidence for autonomous agents.",
         "url": "https://evidence.regulavita.com/",
         "image": "https://evidence.regulavita.com/icon.png",
         "provider": {"@type": "Organization", "name": "Regulavita"},
         "offers": [
+          {"@type": "Offer", "name": "Procured company profile", "price": "0.25", "priceCurrency": "USD"},
           {"@type": "Offer", "name": "Public source snapshot", "price": "0.03", "priceCurrency": "USD"},
           {"@type": "Offer", "name": "30-day source change watch", "price": "1.00", "priceCurrency": "USD"},
           {"@type": "Offer", "name": "SEC Form D funding signals", "price": "0.05", "priceCurrency": "USD"},
@@ -367,7 +368,7 @@
       <div class="shell nav">
         <a class="brand" href="/">
           <img src="/icon.png" alt="">
-          <span>Agent Evidence + Source Watch</span>
+          <span>Agent Procurement + Evidence</span>
         </a>
         <nav class="nav-links" aria-label="Service navigation">
           <a href="/docs">Docs</a>
@@ -381,8 +382,8 @@
       <div class="hero">
         <div class="shell">
           <div class="eyebrow"><span class="live-dot"></span>Live on Base mainnet</div>
-          <h1>Source Extraction + Watch for Agents</h1>
-          <p class="lead">Turn a public HTTPS source into signed, agent-ready text for $0.03, upgrade it to a 30-day change monitor, or retrieve official SEC and OFAC evidence on demand. No account, API key, or human checkout.</p>
+          <h1>Procure Machine Work in One Call</h1>
+          <p class="lead">Delegate provider selection, x402 supplier payment, normalization, and signed delivery for a company profile, or use the existing source monitoring and official-evidence APIs. No account, API key, or human checkout.</p>
           <div class="actions">
             <a class="action" href="/docs">Open API docs</a>
             <a class="action secondary" href="/.well-known/agent-service.json">Read machine manifest</a>
@@ -401,9 +402,18 @@
         <div class="shell">
           <div class="section-heading">
             <h2>Paid endpoints</h2>
-            <p class="section-note">Start with a long-running monitoring job when the value is in catching a future change. Use one-off evidence calls when the agent needs an answer now.</p>
+            <p class="section-note">Use procurement when the agent needs an outcome from multiple machine suppliers. Existing monitoring and evidence experiments remain available unchanged.</p>
           </div>
           <div class="endpoint-list">
+            <article class="endpoint">
+              <span class="method">POST</span>
+              <div>
+                <span class="endpoint-path">/v1/procure/company-profile</span>
+                <p class="endpoint-copy">Procure live retrieval and schema-constrained normalization from two pinned x402 suppliers. Returns bounded company fields, source links, contradictions, supplier settlements, response hashes, partial-failure state, and a signed receipt.</p>
+                <div class="endpoint-links"><a href="/v1/procure/company-profile/sample">Free sample</a><a href="/docs#/default/procure_company_profile_v1_procure_company_profile_post">Open schema</a></div>
+              </div>
+              <div class="price">$0.25<small>per procurement</small></div>
+            </article>
             <article class="endpoint">
               <span class="method">POST</span>
               <div>
@@ -417,7 +427,7 @@
               <span class="method">POST</span>
               <div>
                 <span class="endpoint-path">/v1/monitors/source-change</span>
-                <p class="endpoint-copy">Monitor one public HTTPS text, HTML, JSON, or XML source every six hours for 30 days. Normalized changes are stored as compact diffs and delivered through authenticated polling or an optional HMAC-signed webhook.</p>
+                <p class="endpoint-copy"><strong>Source Change Watch.</strong> Monitor one public HTTPS text, HTML, JSON, or XML source every six hours for 30 days. Normalized changes are stored as compact diffs and delivered through authenticated polling or an optional HMAC-signed webhook.</p>
                 <div class="endpoint-links"><a href="/v1/monitors/source-change/sample">Free sample</a><a href="/docs#/default/create_source_change_watch_v1_monitors_source_change_post">Open schema</a></div>
               </div>
               <div class="price">$1.00<small>30 days</small></div>
@@ -482,17 +492,17 @@
 
       <div class="proof-band">
         <div class="shell proof-grid">
-          <div class="proof-item"><strong>Persistent work</strong><p>Paid monitors run for 30 days, check every six hours, expire automatically, and require no account.</p></div>
-          <div class="proof-item"><strong>Bounded retrieval</strong><p>Public HTTPS only, fixed response limits, no redirects, authenticated pages, or internal-network access.</p></div>
-          <div class="proof-item"><strong>Machine delivery</strong><p>Private bearer-token polling plus optional HMAC-signed webhooks with compact normalized diffs.</p></div>
+          <div class="proof-item"><strong>Brokered execution</strong><p>The procurement route selects and pays pinned suppliers, then returns one normalized machine contract.</p></div>
+          <div class="proof-item"><strong>Bounded exposure</strong><p>Supplier endpoints, Base USDC and maximum prices are fixed, with validated recipients, a separate daily spend cap and explicit partial results.</p></div>
+          <div class="proof-item"><strong>Signed delivery</strong><p>Outputs include source links, supplier settlements, response hashes, contradictions and an Ed25519 receipt.</p></div>
         </div>
       </div>
     </main>
 
     <footer>
       <div class="shell footer-row">
-        <span>Regulavita - Agent Evidence and Source Watch</span>
-        <span>Public-source monitoring and factual evidence only. No advice, authorization, or sanctions clearance.</span>
+        <span>Regulavita - Agent Procurement and Evidence</span>
+        <span>Brokered machine services, public-source monitoring, and factual evidence. No advice, authorization, or sanctions clearance.</span>
       </div>
     </footer>
   </body>

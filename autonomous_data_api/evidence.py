@@ -49,6 +49,7 @@ OFAC_SOURCE_URLS = {
 SEC_PARSER_VERSION = "sec-trigger-delta/0.2.0"
 FORM_D_PARSER_VERSION = "sec-form-d-funding-leads/0.1.0"
 FORM_D_DOSSIER_PARSER_VERSION = "sec-form-d-company-dossier/0.1.0"
+PROCUREMENT_PROFILE_VERSION = "company-profile-procurement/0.1.0"
 OFAC_PARSER_VERSION = "ofac-exact/0.2.0"
 OFAC_FRESHNESS_SECONDS = 900
 MAX_SEC_FILINGS = 10
@@ -367,6 +368,7 @@ class PortfolioMonitorCreateRequest(BaseModel):
             raise ValueError("source URLs must be unique")
         return self
 
+
 class PublicSourceSnapshotRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -625,6 +627,12 @@ class EvidenceService:
                     canonical_request_hash TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     FOREIGN KEY (request_id) REFERENCES prepared_results(request_id)
+                );
+                CREATE TABLE IF NOT EXISTS payment_request_bindings (
+                    payment_signature_hash TEXT PRIMARY KEY,
+                    route TEXT NOT NULL,
+                    canonical_request_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL
                 );
                 """
             )
@@ -1811,9 +1819,7 @@ class EvidenceService:
             },
             "upgrade": {
                 "path": "/v1/gtm/form-d-company-dossier",
-                "price": os.getenv(
-                    "AUTONOMOUS_X402_FORM_D_DOSSIER_PRICE", "$0.25"
-                ),
+                "price": os.getenv("AUTONOMOUS_X402_FORM_D_DOSSIER_PRICE", "$0.25"),
                 "purpose": (
                     "Add fresh web research, supplier settlement provenance, "
                     "source hashes, and a signed dossier receipt for one lead."
@@ -1957,6 +1963,158 @@ class EvidenceService:
         }
         return self._store_prepared(
             "form_d_company_dossier",
+            request_hash,
+            source_bundle_hash,
+            result_core,
+        )
+
+    def prepare_company_profile_procurement(
+        self,
+        request_payload: dict[str, Any],
+        supplier_records: list[dict[str, Any]],
+    ) -> PreparedResult:
+        request_hash = sha256_json(request_payload)
+        successful = [
+            record
+            for record in supplier_records
+            if record.get("status") == "FULFILLED"
+            and isinstance(record.get("payload"), dict)
+        ]
+        if not successful:
+            raise SourceSchemaError("no procurement supplier returned a usable result")
+
+        source_bundle_hash = sha256_json(
+            {
+                "engine_version": PROCUREMENT_PROFILE_VERSION,
+                "suppliers": [
+                    {
+                        "supplier": str(record.get("supplier") or "")[:100],
+                        "endpoint": str(record.get("endpoint") or "")[:500],
+                        "status": str(record.get("status") or "")[:50],
+                        "response_sha256": (
+                            f"sha256:{sha256_json(record['payload'])}"
+                            if isinstance(record.get("payload"), dict)
+                            else None
+                        ),
+                    }
+                    for record in supplier_records
+                ],
+            }
+        )
+        cached = self._cached_prepared(
+            "company_profile_procurement", request_hash, source_bundle_hash
+        )
+        if cached:
+            return cached
+
+        search_result: dict[str, Any] = {}
+        normalized_profile: dict[str, Any] = {}
+        for record in successful:
+            endpoint = str(record.get("endpoint") or "")
+            payload = record["payload"]
+            if "tavily.com/search" in endpoint:
+                search_result = payload
+            elif "blockrun.ai/api/v1/chat/completions" in endpoint:
+                normalized_profile = payload
+
+        source_records = search_result.get("sources")
+        if not isinstance(source_records, list):
+            source_records = []
+        source_records = [
+            {
+                "title": str(source.get("title") or "")[:300],
+                "url": str(source.get("url") or "")[:2048],
+            }
+            for source in source_records[:10]
+            if isinstance(source, dict)
+            and isinstance(source.get("url"), str)
+            and source["url"].startswith("https://")
+        ]
+        source_urls = [str(source.get("url")) for source in source_records][:10]
+        if not normalized_profile:
+            normalized_profile = {
+                "company_name": request_payload.get("company_name"),
+                "domain": request_payload.get("domain"),
+                "ticker": request_payload.get("ticker"),
+                "summary": "Normalization was unavailable; inspect the returned sources.",
+                "industry": None,
+                "products_services": [],
+                "headquarters": None,
+                "field_confidence": {},
+                "contradictions": [],
+                "source_urls": source_urls,
+            }
+        else:
+            normalized_profile["source_urls"] = list(
+                dict.fromkeys(
+                    [
+                        url
+                        for url in normalized_profile.get("source_urls", [])
+                        if isinstance(url, str) and url in source_urls
+                    ]
+                )
+            )
+
+        supplier_execution = []
+        for record in supplier_records:
+            supplier = str(record.get("supplier") or "unknown")[:100]
+            payload = record.get("payload")
+            supplier_execution.append(
+                {
+                    "supplier": supplier,
+                    "endpoint": str(record.get("endpoint") or "")[:500],
+                    "status": str(record.get("status") or "UNKNOWN")[:50],
+                    "price_usd": str(record.get("price_usd") or "0")[:20],
+                    "settlement_transaction": str(
+                        record.get("settlement_transaction") or ""
+                    )[:200]
+                    or None,
+                    "response_sha256": (
+                        f"sha256:{sha256_json(payload)}"
+                        if isinstance(payload, dict)
+                        else None
+                    ),
+                    "error_code": str(record.get("error_code") or "")[:100] or None,
+                }
+            )
+        result_core = {
+            "product": "PROCURED_COMPANY_PROFILE",
+            "decision": (
+                "COMPANY_PROFILE_PROCURED"
+                if len(successful) == len(supplier_records)
+                else "PARTIAL_COMPANY_PROFILE_PROCURED"
+            ),
+            "request": request_payload,
+            "profile": normalized_profile,
+            "reconciliation": {
+                "pipeline_stage_count": len(supplier_records),
+                "successful_stage_count": len(successful),
+                "retrieval_completed": bool(search_result),
+                "normalization_completed": bool(
+                    any(
+                        "blockrun.ai/api/v1/chat/completions"
+                        in str(record.get("endpoint") or "")
+                        for record in successful
+                    )
+                ),
+                "contradictions": normalized_profile.get("contradictions") or [],
+            },
+            "source_records": source_records,
+            "supplier_execution": supplier_execution,
+            "provenance": {
+                "engine_version": PROCUREMENT_PROFILE_VERSION,
+                "request_sha256": f"sha256:{request_hash}",
+                "source_bundle_sha256": f"sha256:{source_bundle_hash}",
+                "result_sha256": None,
+            },
+            "limitations": [
+                "The profile is a schema-constrained synthesis of bounded search excerpts, not a verified registry record.",
+                "Source links are returned for inspection; confidence and contradiction fields are model outputs, not guarantees.",
+                "The signed receipt attests to the returned bytes, request, and supplier-response hashes, not the truth of supplier or publisher claims.",
+            ],
+        }
+        return self._store_prepared(
+            "company_profile_procurement",
             request_hash,
             source_bundle_hash,
             result_core,
@@ -2742,6 +2900,19 @@ class EvidenceService:
     ) -> bool:
         signature_hash = sha256_bytes(payment_signature.encode("utf-8"))
         with self._connect() as connection:
+            intent = connection.execute(
+                """
+                SELECT route, canonical_request_hash
+                FROM payment_request_bindings
+                WHERE payment_signature_hash = ?
+                """,
+                (signature_hash,),
+            ).fetchone()
+            if intent and not (
+                intent["route"] == route
+                and intent["canonical_request_hash"] == prepared.request_hash
+            ):
+                return False
             existing = connection.execute(
                 """
                 SELECT request_id, route, canonical_request_hash
@@ -2751,11 +2922,25 @@ class EvidenceService:
                 (signature_hash,),
             ).fetchone()
             if existing:
-                return bool(
-                    existing["request_id"] == prepared.request_id
-                    and existing["route"] == route
+                if not (
+                    existing["route"] == route
                     and existing["canonical_request_hash"] == prepared.request_hash
-                )
+                ):
+                    return False
+                if existing["request_id"] == prepared.request_id:
+                    return True
+                if not str(existing["request_id"]).startswith("pending_"):
+                    return False
+                if existing["request_id"] != prepared.request_id:
+                    connection.execute(
+                        """
+                        UPDATE payment_bindings SET request_id = ?
+                        WHERE payment_signature_hash = ?
+                        """,
+                        (prepared.request_id, signature_hash),
+                    )
+                    connection.commit()
+                return True
             connection.execute(
                 """
                 INSERT INTO payment_bindings (
@@ -2770,6 +2955,51 @@ class EvidenceService:
                     prepared.request_hash,
                     utc_now(),
                 ),
+            )
+            connection.commit()
+        return True
+
+    def bind_payment_request(
+        self,
+        payment_signature: str,
+        request_hash: str,
+        route: str,
+    ) -> bool:
+        signature_hash = sha256_bytes(payment_signature.encode("utf-8"))
+        with self._connect() as connection:
+            existing = connection.execute(
+                """
+                SELECT route, canonical_request_hash
+                FROM payment_request_bindings
+                WHERE payment_signature_hash = ?
+                """,
+                (signature_hash,),
+            ).fetchone()
+            if existing:
+                return bool(
+                    existing["route"] == route
+                    and existing["canonical_request_hash"] == request_hash
+                )
+            completed = connection.execute(
+                """
+                SELECT route, canonical_request_hash
+                FROM payment_bindings
+                WHERE payment_signature_hash = ?
+                """,
+                (signature_hash,),
+            ).fetchone()
+            if completed:
+                return bool(
+                    completed["route"] == route
+                    and completed["canonical_request_hash"] == request_hash
+                )
+            connection.execute(
+                """
+                INSERT INTO payment_request_bindings (
+                    payment_signature_hash, route, canonical_request_hash, created_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (signature_hash, route, request_hash, utc_now()),
             )
             connection.commit()
         return True
@@ -2909,6 +3139,18 @@ class EvidenceService:
             return status
 
         route_metadata = {
+            "/v1/procure/company-profile": {
+                "tier": "brokered-capability",
+                "price_usd": "0.25",
+                "cohort_start_utc": os.getenv(
+                    "AUTONOMOUS_PROCUREMENT_EXPERIMENT_START_UTC", ""
+                )
+                or None,
+                "hypothesis": (
+                    "Agents will pay a broker to select, pay, normalize, and "
+                    "reconcile machine suppliers behind one stable contract."
+                ),
+            },
             "/v1/web/source-snapshot": {
                 "tier": "one-shot-extraction",
                 "price_usd": "0.03",

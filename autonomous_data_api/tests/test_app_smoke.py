@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import json
 import os
@@ -18,8 +19,8 @@ import jwt
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, Response
 from fastapi.testclient import TestClient
 
 from autonomous_data_api.app import (
@@ -203,11 +204,65 @@ def test_mainnet_revenue_cap_blocks_before_route_execution():
     assert int(response.headers["retry-after"]) > 0
 
 
+def test_mainnet_revenue_cap_does_not_hold_lock_during_fulfillment():
+    class StubService:
+        @staticmethod
+        def fulfilled_revenue_since(_timestamp_utc, _network):
+            return Decimal(0)
+
+    async def run_concurrently():
+        async def unused_app(_scope, _receive, _send):
+            return None
+
+        middleware = MainnetRevenueCapMiddleware(
+            unused_app,
+            service=StubService(),
+            network="eip155:8453",
+            daily_cap=Decimal("1.00"),
+            route_prices={("POST", "/paid"): Decimal("0.10")},
+        )
+        entered = 0
+        both_entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def call_next(_request):
+            nonlocal entered
+            entered += 1
+            if entered == 2:
+                both_entered.set()
+            await release.wait()
+            return Response(status_code=200)
+
+        def request():
+            return Request(
+                {
+                    "type": "http",
+                    "method": "POST",
+                    "path": "/paid",
+                    "raw_path": b"/paid",
+                    "query_string": b"",
+                    "headers": [],
+                    "scheme": "https",
+                    "server": ("testserver", 443),
+                    "client": ("127.0.0.1", 1234),
+                }
+            )
+
+        first = asyncio.create_task(middleware.dispatch(request(), call_next))
+        second = asyncio.create_task(middleware.dispatch(request(), call_next))
+        await asyncio.wait_for(both_entered.wait(), timeout=1)
+        release.set()
+        await asyncio.gather(first, second)
+
+    asyncio.run(run_concurrently())
+
+
 def test_health_and_retired_wedges(client):
     index = client.get("/")
     assert index.status_code == 200
     assert index.headers["content-type"].startswith("text/html")
     assert "Source Change Watch" in index.text
+    assert "/v1/procure/company-profile" in index.text
     assert 'href="/.well-known/agent-service.json"' in index.text
 
     index_json = client.get("/index.json")
@@ -228,6 +283,13 @@ def test_health_and_retired_wedges(client):
         "ofac_exact": "$0.05",
     }
     assert health.json()["x402"]["revenue_ready"] is False
+    assert health.json()["company_profile_procurement"]["enabled"] is False
+    assert (
+        health.json()["company_profile_procurement"][
+            "maximum_supplier_cost_per_call_usd"
+        ]
+        == "0.02"
+    )
     for path in (
         "/v1/public/pfas/sample",
         "/v1/public/grid/sample",
@@ -237,6 +299,28 @@ def test_health_and_retired_wedges(client):
         response = client.get(path)
         assert response.status_code == 410
         assert response.json()["error"] == "RETIRED_WEDGE"
+
+
+def test_procurement_quote_and_sample_are_free_and_strict(client):
+    sample = client.get("/v1/procure/company-profile/sample")
+    assert sample.status_code == 200
+    assert sample.json()["price"] == "$0.25"
+    assert sample.json()["example_result"]["product"] == ("PROCURED_COMPANY_PROFILE")
+
+    quote = client.post(
+        "/v1/procure/company-profile/quote",
+        json={"company_name": "Stripe", "domain": "stripe.com"},
+    )
+    assert quote.status_code == 200
+    assert quote.json()["price"] == "$0.25"
+    assert quote.json()["maximum_supplier_cost_usd"] == "0.02"
+    assert len(quote.json()["supplier_plan"]) == 2
+
+    invalid = client.post(
+        "/v1/procure/company-profile/quote",
+        json={"company_name": "Stripe", "domain": "https://stripe.com/path"},
+    )
+    assert invalid.status_code == 422
 
 
 def test_agent_manifest_promotes_only_verdict_endpoints(client):
