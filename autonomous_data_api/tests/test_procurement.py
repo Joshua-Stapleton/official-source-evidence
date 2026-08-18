@@ -380,6 +380,15 @@ def test_blockrun_profile_rejects_unsupplied_source_references():
     assert captured.value.code == "BLOCKRUN_SOURCE_REFERENCE_INVALID"
 
 
+def test_blockrun_request_uses_verified_non_reasoning_json_mode():
+    payload = ProcurementBrokerService._blockrun_payload(request(), sources())
+
+    assert payload["model"] == "deepseek/deepseek-chat"
+    assert "reasoning_effort" not in payload
+    assert payload["response_format"] == {"type": "json_object"}
+    assert '"company_name"' in payload["messages"][0]["content"]
+
+
 def test_blockrun_profile_rejects_different_company_domain():
     payload = {
         "choices": [
