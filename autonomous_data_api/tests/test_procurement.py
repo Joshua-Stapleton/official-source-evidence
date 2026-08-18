@@ -356,7 +356,7 @@ def test_tavily_failure_fails_without_calling_blockrun(tmp_path):
     assert evidence.prepare_calls == 0
 
 
-def test_blockrun_profile_rejects_unsupplied_source_references():
+def test_blockrun_profile_discards_unsupplied_source_references():
     payload = {
         "choices": [
             {
@@ -372,12 +372,11 @@ def test_blockrun_profile_rejects_unsupplied_source_references():
         ]
     }
 
-    with pytest.raises(ProcurementSupplierError) as captured:
-        ProcurementBrokerService._derive_blockrun_profile(
-            payload, {"https://example.com/"}, "example.com"
-        )
+    normalized = ProcurementBrokerService._derive_blockrun_profile(
+        payload, {"https://example.com/"}, request()
+    )
 
-    assert captured.value.code == "BLOCKRUN_SOURCE_REFERENCE_INVALID"
+    assert normalized["source_urls"] == ["https://example.com/"]
 
 
 def test_blockrun_request_uses_verified_non_reasoning_json_mode():
@@ -410,10 +409,10 @@ def test_blockrun_profile_accepts_fenced_json_and_safe_optional_defaults():
     }
 
     normalized = ProcurementBrokerService._derive_blockrun_profile(
-        payload, {"https://example.com/"}, "example.com"
+        payload, {"https://example.com/"}, request()
     )
 
-    assert normalized["ticker"] is None
+    assert normalized["ticker"] == "EXM"
     assert normalized["products_services"] == []
     assert normalized["field_confidence"] == {}
     assert normalized["source_urls"] == ["https://example.com/"]
@@ -434,7 +433,51 @@ def test_blockrun_profile_rejects_different_company_domain():
 
     with pytest.raises(ProcurementSupplierError) as captured:
         ProcurementBrokerService._derive_blockrun_profile(
-            payload, {"https://example.com/"}, "example.com"
+            payload, {"https://example.com/"}, request()
         )
 
     assert captured.value.code == "BLOCKRUN_COMPANY_MISMATCH"
+
+
+def test_blockrun_profile_sanitizes_optional_supplier_shape():
+    shaped = {
+        **profile(),
+        "company_name": "Supplier-controlled name",
+        "ticker": "WRONG",
+        "products_services": ["  Business software  ", {"bad": "shape"}],
+        "field_confidence": {
+            "summary": "0.8",
+            "bad key": 1,
+            "industry": 4,
+        },
+        "contradictions": [
+            {
+                "field": " industry ",
+                "description": " Conflicting descriptions. ",
+                "source_urls": [
+                    "https://example.com",
+                    "https://not-allowed.example/",
+                ],
+                "ignored": True,
+            }
+        ],
+        "source_urls": [
+            "https://example.com",
+            "https://not-allowed.example/",
+        ],
+        "unexpected": "ignored",
+    }
+    payload = {
+        "choices": [{"message": {"content": json.dumps(shaped)}}],
+    }
+
+    normalized = ProcurementBrokerService._derive_blockrun_profile(
+        payload, {"https://example.com/"}, request()
+    )
+
+    assert normalized["company_name"] == "Example Corporation"
+    assert normalized["ticker"] == "EXM"
+    assert normalized["products_services"] == ["Business software"]
+    assert normalized["field_confidence"] == {"summary": 0.8}
+    assert normalized["source_urls"] == ["https://example.com/"]
+    assert normalized["contradictions"][0]["source_urls"] == ["https://example.com/"]

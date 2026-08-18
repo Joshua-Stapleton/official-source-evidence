@@ -842,7 +842,7 @@ class ProcurementBrokerService:
     def _derive_blockrun_profile(
         payload: dict[str, Any],
         allowed_urls: set[str],
-        expected_domain: str,
+        request: CompanyProfileProcurementRequest,
     ) -> dict[str, Any]:
         try:
             content = payload["choices"][0]["message"]["content"]
@@ -858,20 +858,117 @@ class ProcurementBrokerService:
                 parsed = json.loads(fenced.group(1) if fenced else serialized)
             else:
                 raise TypeError("profile content is not an object or string")
-            if isinstance(parsed, dict) and not parsed.get("source_urls"):
-                parsed["source_urls"] = sorted(allowed_urls)
-            profile = _NormalizedCompanyProfile.model_validate(parsed)
         except (IndexError, KeyError, TypeError, ValueError) as exc:
             raise ProcurementSupplierError(
                 "BLOCKRUN_RESPONSE_INVALID",
                 "BlockRun returned no valid company profile",
             ) from exc
-        normalized = profile.model_dump(mode="json")
-        if normalized["domain"] != expected_domain:
+
+        if not isinstance(parsed, dict):
+            raise ProcurementSupplierError(
+                "BLOCKRUN_RESPONSE_INVALID",
+                "BlockRun returned no JSON object",
+            )
+        returned_domain = parsed.get("domain")
+        if returned_domain is not None:
+            try:
+                returned_domain = _normalize_public_domain(returned_domain)
+            except ValueError as exc:
+                raise ProcurementSupplierError(
+                    "BLOCKRUN_COMPANY_MISMATCH",
+                    "BlockRun returned an invalid company domain",
+                ) from exc
+        if returned_domain not in {None, request.domain}:
             raise ProcurementSupplierError(
                 "BLOCKRUN_COMPANY_MISMATCH",
                 "BlockRun returned a profile for a different company domain",
             )
+
+        summary = " ".join(str(parsed.get("summary") or "").split())[:2_000]
+        if not summary:
+            raise ProcurementSupplierError(
+                "BLOCKRUN_RESPONSE_INVALID",
+                "BlockRun returned no usable company summary",
+            )
+
+        def optional_text(key: str, limit: int) -> str | None:
+            value = parsed.get(key)
+            if not isinstance(value, str):
+                return None
+            cleaned = " ".join(value.split())[:limit]
+            return cleaned or None
+
+        products_services = (
+            [
+                " ".join(item.split())[:300]
+                for item in (parsed.get("products_services") or [])[:20]
+                if isinstance(item, str) and item.strip()
+            ]
+            if isinstance(parsed.get("products_services"), list)
+            else []
+        )
+
+        field_confidence: dict[str, float] = {}
+        if isinstance(parsed.get("field_confidence"), dict):
+            for key, value in list(parsed["field_confidence"].items())[:30]:
+                try:
+                    score = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if (
+                    isinstance(key, str)
+                    and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", key)
+                    and math.isfinite(score)
+                    and 0 <= score <= 1
+                ):
+                    field_confidence[key] = score
+
+        def allowed_source_urls(value: Any) -> list[str]:
+            if not isinstance(value, list):
+                return []
+            normalized_urls = []
+            for candidate in value[:20]:
+                try:
+                    normalized_url = _normalize_source_url(candidate)
+                except (TypeError, ValueError):
+                    continue
+                if normalized_url in allowed_urls:
+                    normalized_urls.append(normalized_url)
+            return list(dict.fromkeys(normalized_urls))
+
+        contradictions = []
+        if isinstance(parsed.get("contradictions"), list):
+            for item in parsed["contradictions"][:10]:
+                if not isinstance(item, dict):
+                    continue
+                field = " ".join(str(item.get("field") or "").split())[:100]
+                description = " ".join(str(item.get("description") or "").split())[:500]
+                if field and description:
+                    contradictions.append(
+                        {
+                            "field": field,
+                            "description": description,
+                            "source_urls": allowed_source_urls(item.get("source_urls"))[
+                                :10
+                            ],
+                        }
+                    )
+
+        normalized = _NormalizedCompanyProfile.model_validate(
+            {
+                "company_name": request.company_name,
+                "domain": request.domain,
+                "ticker": request.ticker,
+                "summary": summary,
+                "industry": optional_text("industry", 200),
+                "products_services": products_services,
+                "headquarters": optional_text("headquarters", 300),
+                "field_confidence": field_confidence,
+                "contradictions": contradictions,
+                "source_urls": allowed_source_urls(parsed.get("source_urls"))
+                or sorted(allowed_urls),
+            }
+        ).model_dump(mode="json")
         referenced_urls = set(normalized["source_urls"])
         for contradiction in normalized["contradictions"]:
             referenced_urls.update(contradiction["source_urls"])
@@ -895,7 +992,7 @@ class ProcurementBrokerService:
             derived = self._derive_blockrun_profile(
                 payload,
                 {record["url"] for record in source_records},
-                request.domain,
+                request,
             )
         except ProcurementSupplierError as exc:
             exc.amount_atomic = amount
