@@ -164,13 +164,13 @@ class _NormalizedCompanyProfile(BaseModel):
 
     company_name: str = Field(min_length=2, max_length=200)
     domain: str
-    ticker: str | None
+    ticker: str | None = None
     summary: str = Field(min_length=1, max_length=2_000)
-    industry: str | None = Field(max_length=200)
-    products_services: list[str] = Field(max_length=20)
-    headquarters: str | None = Field(max_length=300)
-    field_confidence: dict[str, float] = Field(min_length=1, max_length=30)
-    contradictions: list[_Contradiction] = Field(max_length=10)
+    industry: str | None = Field(default=None, max_length=200)
+    products_services: list[str] = Field(default_factory=list, max_length=20)
+    headquarters: str | None = Field(default=None, max_length=300)
+    field_confidence: dict[str, float] = Field(default_factory=dict, max_length=30)
+    contradictions: list[_Contradiction] = Field(default_factory=list, max_length=10)
     source_urls: list[str] = Field(min_length=1, max_length=20)
 
     @field_validator("company_name", mode="before")
@@ -833,7 +833,7 @@ class ProcurementBrokerService:
                     ),
                 },
             ],
-            "max_tokens": 500,
+            "max_tokens": 800,
             "temperature": 0,
             "response_format": {"type": "json_object"},
         }
@@ -846,7 +846,20 @@ class ProcurementBrokerService:
     ) -> dict[str, Any]:
         try:
             content = payload["choices"][0]["message"]["content"]
-            parsed = content if isinstance(content, dict) else json.loads(content)
+            if isinstance(content, dict):
+                parsed = content
+            elif isinstance(content, str):
+                serialized = content.strip()
+                fenced = re.fullmatch(
+                    r"```(?:json)?\s*(\{.*\})\s*```",
+                    serialized,
+                    flags=re.DOTALL | re.IGNORECASE,
+                )
+                parsed = json.loads(fenced.group(1) if fenced else serialized)
+            else:
+                raise TypeError("profile content is not an object or string")
+            if isinstance(parsed, dict) and not parsed.get("source_urls"):
+                parsed["source_urls"] = sorted(allowed_urls)
             profile = _NormalizedCompanyProfile.model_validate(parsed)
         except (IndexError, KeyError, TypeError, ValueError) as exc:
             raise ProcurementSupplierError(

@@ -387,6 +387,36 @@ def test_blockrun_request_uses_verified_non_reasoning_json_mode():
     assert "reasoning_effort" not in payload
     assert payload["response_format"] == {"type": "json_object"}
     assert '"company_name"' in payload["messages"][0]["content"]
+    assert payload["max_tokens"] == 800
+
+
+def test_blockrun_profile_accepts_fenced_json_and_safe_optional_defaults():
+    payload = {
+        "choices": [
+            {
+                "message": {
+                    "content": "```json\n"
+                    + json.dumps(
+                        {
+                            "company_name": "Example Corporation",
+                            "domain": "example.com",
+                            "summary": "A business software company.",
+                        }
+                    )
+                    + "\n```"
+                }
+            }
+        ]
+    }
+
+    normalized = ProcurementBrokerService._derive_blockrun_profile(
+        payload, {"https://example.com/"}, "example.com"
+    )
+
+    assert normalized["ticker"] is None
+    assert normalized["products_services"] == []
+    assert normalized["field_confidence"] == {}
+    assert normalized["source_urls"] == ["https://example.com/"]
 
 
 def test_blockrun_profile_rejects_different_company_domain():
