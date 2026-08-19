@@ -88,6 +88,32 @@ The portfolio continues to use these global scale gates:
 Until those gates move, the scientifically correct result is: autonomous
 distribution and payment are validated; repeat commercial demand is not.
 
+## 2026-08-19 Non-Owner Event
+
+The ledger recorded a third non-owner payer cluster buying
+`/v1/ofac/payment-preflight` for `$0.01` at `2026-08-18T21:54:43Z`. The Base
+transaction was
+`0xf2170b943ca11f0b18c92130f44ab8016717ab0184879ac415282476ff3818e3`
+and the payer was `0x843b544bf5f0aa6cbf13e94563874878c98cc4a7`.
+
+This event remains **non-owner, unverified**, not confirmed organic demand:
+
+- Eight minutes before our purchase, the wallet began receiving a series of
+  `$0.01`-`$0.04` transfers from wallets associated in Coinbase Bazaar with
+  PaySponge, AgentRes, and AgentPhone services.
+- The observed incoming total was `$0.16` across 12 transfers.
+- The following morning, the same wallet paid `$0.001` to the OttoAI merchant
+  wallet and `$0.002` to BlockRun.
+- The exact OttoAI endpoint cannot be recovered from the settlement alone
+  because that receiving wallet serves multiple equally priced routes.
+
+The cross-service sequence is consistent with automated machine purchasing,
+but the drip funding and ecosystem-linked sources also fit a catalog, routing,
+refund, or integration-test wallet. It therefore strengthens evidence that
+agents can compose paid services, while providing weak evidence that our OFAC
+result itself delivered recurring economic value. No product or price change
+is justified by this event alone.
+
 ## Detailed Artifacts
 
 - [First-customer forensic](research/first-customer-forensic-2026-08-10.md)

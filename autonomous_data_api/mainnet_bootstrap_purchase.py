@@ -90,6 +90,15 @@ PRODUCTS = {
             "max_source_age_seconds": 600,
         },
     },
+    "procurement": {
+        "endpoint": "https://evidence.regulavita.com/v1/procure/company-profile",
+        "amount_atomic": "250000",
+        "arm_value": "0.25",
+        "payload": {
+            "company_name": "Stripe",
+            "domain": "stripe.com",
+        },
+    },
     "ofac": {
         "endpoint": (
             "https://evidence.regulavita.com/v1/ofac/exact-identifier-evidence"
@@ -258,7 +267,11 @@ async def main() -> None:
                 "product": args.product,
                 "buyer": account.address,
                 "request_id": result.get("request_id"),
+                "product_status": result.get("status"),
                 "decision": result.get("decision"),
+                "profile": result.get("profile"),
+                "source_record_count": len(result.get("source_records", [])),
+                "supplier_execution": result.get("supplier_execution"),
                 "monitor_id": result.get("monitor_id"),
                 "portfolio_id": result.get("portfolio_id"),
                 "portfolio_source_count": result.get("source_count"),

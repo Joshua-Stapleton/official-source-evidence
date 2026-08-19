@@ -79,3 +79,16 @@ guarantee, scarce supplier, or action rather than merely more fields.
 - Treat retrieval success with normalization failure as an explicit partial
   result; do not invent fields.
 - Preserve the service-wide `$10` accepted-revenue cap.
+
+## Operational Validation
+
+On 2026-08-19, one owner-classified production smoke purchase completed the
+full two-supplier path. The customer settlement was `$0.25`; Tavily retrieval
+settled for `$0.01`; BlockRun normalization settled for `$0.002`; and the
+response returned five bounded sources, a normalized profile, field confidence,
+contradictions, hashes, and a signed receipt. Coinbase Bazaar indexed the route
+immediately after this successful call.
+
+This validates production settlement and fulfillment after the normalization
+boundary fix. It remains excluded from every demand and revenue gate because
+the payer was the owner wallet.
