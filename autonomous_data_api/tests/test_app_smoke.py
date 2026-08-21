@@ -326,6 +326,29 @@ def test_procurement_quote_and_sample_are_free_and_strict(client):
     )
     assert invalid.status_code == 422
 
+    python_sample = client.get("/v1/compute/python-run/sample")
+    assert python_sample.status_code == 200
+    assert python_sample.json()["price"] == "$0.03"
+    assert python_sample.json()["economics"] == {
+        "maximum_supplier_cost_usd": "0.015",
+        "maximum_gross_margin_usd": "0.015",
+    }
+
+    python_quote = client.post(
+        "/v1/compute/python-run/quote",
+        json={"code": "print(sum(range(11)))", "timeout_seconds": 5},
+    )
+    assert python_quote.status_code == 200
+    assert python_quote.json()["price"] == "$0.03"
+    assert python_quote.json()["maximum_supplier_cost_usd"] == "0.015"
+    assert len(python_quote.json()["supplier_plan"]) == 3
+
+    invalid_python = client.post(
+        "/v1/compute/python-run/quote",
+        json={"code": "print(1)", "timeout_seconds": 31},
+    )
+    assert invalid_python.status_code == 422
+
 
 def test_agent_manifest_promotes_only_verdict_endpoints(client):
     manifest = client.get("/.well-known/agent-service.json")

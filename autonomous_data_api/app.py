@@ -71,6 +71,7 @@ from autonomous_data_api.procurement import (
     CompanyProfileProcurementRequest,
     ProcurementBrokerError,
     ProcurementBrokerService,
+    PythonRunRequest,
 )
 from autonomous_data_api.suppliers import DossierSupplierError, FundingDossierService
 
@@ -90,6 +91,7 @@ X402_SOURCE_WATCH_PRICE = os.getenv("AUTONOMOUS_X402_SOURCE_WATCH_PRICE", "$1.00
 X402_PORTFOLIO_WATCH_PRICE = os.getenv("AUTONOMOUS_X402_PORTFOLIO_WATCH_PRICE", "$9.00")
 X402_SOURCE_SNAPSHOT_PRICE = os.getenv("AUTONOMOUS_X402_SOURCE_SNAPSHOT_PRICE", "$0.03")
 X402_COMPANY_PROFILE_PRICE = os.getenv("AUTONOMOUS_X402_COMPANY_PROFILE_PRICE", "$0.25")
+X402_PYTHON_RUN_PRICE = os.getenv("AUTONOMOUS_X402_PYTHON_RUN_PRICE", "$0.03")
 CONVERSION_EXPERIMENT_START_UTC = os.getenv(
     "AUTONOMOUS_CONVERSION_EXPERIMENT_START_UTC", ""
 ).strip()
@@ -193,6 +195,10 @@ SOURCE_SNAPSHOT_PROBE_PAYLOAD = {
 COMPANY_PROFILE_PROBE_PAYLOAD = {
     "company_name": "Stripe",
     "domain": "stripe.com",
+}
+PYTHON_RUN_PROBE_PAYLOAD = {
+    "code": "import json; print(json.dumps({'answer': sum(range(11))}))",
+    "timeout_seconds": 10,
 }
 
 
@@ -1366,6 +1372,110 @@ if PROCUREMENT_READY:
             ),
         ),
     )
+    x402_routes["POST /v1/compute/python-run"] = RouteConfig(
+        accepts=[
+            PaymentOption(
+                scheme="exact",
+                pay_to=X402_PAY_TO,
+                price=X402_PYTHON_RUN_PRICE,
+                network=X402_NETWORK,
+            )
+        ],
+        mime_type="application/json",
+        description=(
+            "Run bounded Python 3.11 code in an ephemeral isolated sandbox with one "
+            "x402 payment. This service creates the sandbox, executes the code, "
+            "captures stdout, stderr, and return code, terminates the sandbox, and "
+            "returns supplier settlements plus a signed receipt."
+        ),
+        service_name="One-Call Isolated Python Runner",
+        tags=[
+            "python",
+            "code-execution",
+            "sandbox",
+            "isolated-compute",
+            "agent-runtime",
+            "service-orchestration",
+            "x402",
+        ],
+        icon_url=SERVICE_ICON_URL,
+        extensions=get_discovery_extension(
+            method="POST",
+            input=PYTHON_RUN_PROBE_PAYLOAD,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 6000,
+                        "description": "Python 3.11 source code to execute.",
+                    },
+                    "timeout_seconds": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 30,
+                        "default": 10,
+                    },
+                },
+                "required": ["code"],
+                "additionalProperties": False,
+            },
+            output=OutputConfig(
+                example={
+                    "request_id": "isolated_python_run_example",
+                    "product": "ISOLATED_PYTHON_RUN",
+                    "decision": "PYTHON_EXECUTION_COMPLETED",
+                    "execution": {
+                        "returncode": 0,
+                        "stdout": '{"answer": 55}\n',
+                        "stderr": "",
+                        "timed_out": False,
+                    },
+                    "request": {
+                        "code_sha256": f"sha256:{'0' * 64}",
+                        "code_characters": 61,
+                        "timeout_seconds": 10,
+                    },
+                    "sandbox": {
+                        "runtime": "python:3.11",
+                        "isolated_from_service_host": True,
+                        "maximum_cpu": 1.0,
+                        "memory_mb": 512,
+                        "termination": "FULFILLED",
+                    },
+                    "supplier_execution": [],
+                    "provenance": {"engine_version": "isolated-python-run/0.1.0"},
+                    "receipt": {"algorithm": "Ed25519"},
+                },
+                schema={
+                    "type": "object",
+                    "required": [
+                        "request_id",
+                        "product",
+                        "decision",
+                        "execution",
+                        "request",
+                        "sandbox",
+                        "supplier_execution",
+                        "provenance",
+                        "receipt",
+                    ],
+                    "properties": {
+                        "request_id": {"type": "string"},
+                        "product": {"const": "ISOLATED_PYTHON_RUN"},
+                        "decision": {"const": "PYTHON_EXECUTION_COMPLETED"},
+                        "execution": {"type": "object"},
+                        "request": {"type": "object"},
+                        "sandbox": {"type": "object"},
+                        "supplier_execution": {"type": "array"},
+                        "provenance": {"type": "object"},
+                        "receipt": {"type": "object"},
+                    },
+                },
+            ),
+        ),
+    )
 app.add_middleware(PaymentMiddlewareASGI, routes=x402_routes, server=x402_server)
 
 
@@ -1603,7 +1713,12 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
                     CompanyProfileProcurementRequest,
                     X402_COMPANY_PROFILE_PRICE,
                     COMPANY_PROFILE_PROBE_PAYLOAD,
-                )
+                ),
+                "/v1/compute/python-run": (
+                    PythonRunRequest,
+                    X402_PYTHON_RUN_PRICE,
+                    PYTHON_RUN_PROBE_PAYLOAD,
+                ),
             }
             if PROCUREMENT_READY
             else {}
@@ -1665,8 +1780,15 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
                 headers={"Retry-After": "60"},
                 content={"error": {"code": "RATE_LIMITED"}},
             )
+        maximum_body_bytes = (
+            65_536 if request.url.path == "/v1/compute/python-run" else 8_192
+        )
         content_length = request.headers.get("content-length")
-        if content_length and content_length.isdigit() and int(content_length) > 8192:
+        if (
+            content_length
+            and content_length.isdigit()
+            and int(content_length) > maximum_body_bytes
+        ):
             return JSONResponse(
                 status_code=413,
                 content={"error": {"code": "REQUEST_TOO_LARGE"}},
@@ -1682,7 +1804,10 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
                     status_code=400,
                     content={"error": {"code": "INVALID_JSON"}},
                 )
-        if len(json.dumps(payload, separators=(",", ":")).encode("utf-8")) > 8192:
+        if (
+            len(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+            > maximum_body_bytes
+        ):
             return JSONResponse(
                 status_code=413,
                 content={"error": {"code": "REQUEST_TOO_LARGE"}},
@@ -2074,7 +2199,10 @@ app.add_middleware(
             {
                 ("POST", "/v1/procure/company-profile"): price_decimal(
                     X402_COMPANY_PROFILE_PRICE
-                )
+                ),
+                ("POST", "/v1/compute/python-run"): price_decimal(
+                    X402_PYTHON_RUN_PRICE
+                ),
             }
             if PROCUREMENT_READY
             else {}
@@ -2141,6 +2269,11 @@ def health() -> dict[str, Any]:
                     if PROCUREMENT_READY
                     else {}
                 ),
+                **(
+                    {"isolated_python_run": X402_PYTHON_RUN_PRICE}
+                    if PROCUREMENT_READY
+                    else {}
+                ),
                 "ofac_preflight": X402_OFAC_PREFLIGHT_PRICE,
                 "sec_signal": X402_SEC_SIGNAL_PRICE,
                 "ofac_exact": X402_OFAC_PRICE,
@@ -2174,6 +2307,15 @@ def health() -> dict[str, Any]:
                 "BlockRun model gateway via x402",
             ],
             "maximum_supplier_cost_per_call_usd": "0.02",
+            "supplier_daily_cap_usd": f"{PROCUREMENT_SUPPLIER_DAILY_CAP_USD:.2f}",
+            "supplier_wallet_configured": procurement_broker_service.configured,
+        },
+        "isolated_python_run": {
+            "enabled": PROCUREMENT_READY,
+            "supplier": "BlockRun Modal sandbox via x402",
+            "maximum_supplier_cost_per_call_usd": "0.015",
+            "customer_price_usd": X402_PYTHON_RUN_PRICE,
+            "maximum_runtime_seconds": 30,
             "supplier_daily_cap_usd": f"{PROCUREMENT_SUPPLIER_DAILY_CAP_USD:.2f}",
             "supplier_wallet_configured": procurement_broker_service.configured,
         },
@@ -2230,6 +2372,7 @@ def sitemap() -> Response:
         "/docs",
         "/openapi.json",
         "/v1/procure/company-profile/sample",
+        "/v1/compute/python-run/sample",
         "/v1/web/source-snapshot/sample",
         "/v1/monitors/source-change/sample",
         "/v1/monitors/source-change-portfolio/sample",
@@ -2262,6 +2405,7 @@ def llms_txt() -> PlainTextResponse:
 Brokered machine-service procurement, long-running monitoring jobs, and pay-per-call official-source evidence for autonomous agents. No account or API key.
 
 ## Paid endpoints
+- POST {base_url}/v1/compute/python-run - $0.03 USDC. Run bounded Python 3.11 code in an ephemeral isolated sandbox with one payment. Returns stdout, stderr, return code, three-stage supplier settlement provenance, and a signed receipt.
 - POST {base_url}/v1/procure/company-profile - $0.25 USDC. Procure bounded current company research and schema-constrained normalization from two pinned x402 suppliers. Returns derived fields, source links, contradictions, supplier settlements, partial-failure state, response hashes, and a signed receipt.
 - POST {base_url}/v1/web/source-snapshot - $0.03 USDC. Fetch one public HTTPS HTML, JSON, XML, or text source as normalized agent-ready text with optional literal excerpts, a content hash, and an Ed25519-signed receipt.
 - POST {base_url}/v1/monitors/source-change - $1.00 USDC. Monitor one public HTTPS text, HTML, JSON, or XML source every six hours for 30 days. Private polling and optional HMAC-signed change webhooks are included.
@@ -2276,6 +2420,8 @@ Brokered machine-service procurement, long-running monitoring jobs, and pay-per-
 - OpenAPI: {base_url}/openapi.json
 - Agent manifest: {base_url}/.well-known/agent-service.json
 - Interactive docs: {base_url}/docs
+- Isolated Python Runner sample: {base_url}/v1/compute/python-run/sample
+- Isolated Python Runner free quote: {base_url}/v1/compute/python-run/quote
 - Company Profile Procurement sample: {base_url}/v1/procure/company-profile/sample
 - Company Profile Procurement free quote: {base_url}/v1/procure/company-profile/quote
 - Public Source Snapshot sample: {base_url}/v1/web/source-snapshot/sample
@@ -2301,7 +2447,7 @@ def agent_manifest() -> dict[str, Any]:
     return {
         "name": "Agent Procurement and Evidence API",
         "description": (
-            "Brokered company-profile procurement, one-shot public-source "
+            "One-call isolated Python execution, brokered company-profile procurement, one-shot public-source "
             "extraction, long-running source-change monitors, SEC signals, OFAC "
             "payment preflight, and signed receipts."
         ),
@@ -2326,6 +2472,11 @@ def agent_manifest() -> dict[str, Any]:
                     if PROCUREMENT_READY
                     else {}
                 ),
+                **(
+                    {"/v1/compute/python-run": X402_PYTHON_RUN_PRICE}
+                    if PROCUREMENT_READY
+                    else {}
+                ),
                 "/v1/ofac/payment-preflight": X402_OFAC_PREFLIGHT_PRICE,
                 "/v1/sec/filing-change-signal": X402_SEC_SIGNAL_PRICE,
                 "/v1/sec/filing-trigger-delta": X402_SEC_PRICE,
@@ -2341,6 +2492,7 @@ def agent_manifest() -> dict[str, Any]:
         "openapi_url": f"{base_url}/openapi.json",
         "llms_url": f"{base_url}/llms.txt",
         "sample_endpoints": [
+            f"{base_url}/v1/compute/python-run/sample",
             f"{base_url}/v1/procure/company-profile/sample",
             f"{base_url}/v1/web/source-snapshot/sample",
             f"{base_url}/v1/monitors/source-change/sample",
@@ -2350,6 +2502,7 @@ def agent_manifest() -> dict[str, Any]:
             f"{base_url}/v1/ofac/sample",
         ],
         "agent_paid_endpoints": [
+            *([f"{base_url}/v1/compute/python-run"] if PROCUREMENT_READY else []),
             *([f"{base_url}/v1/procure/company-profile"] if PROCUREMENT_READY else []),
             f"{base_url}/v1/web/source-snapshot",
             f"{base_url}/v1/monitors/source-change",
@@ -2368,6 +2521,7 @@ def agent_manifest() -> dict[str, Any]:
         "status_endpoint": f"{base_url}/v1/experiments/status",
         "source_watch_stats_endpoint": f"{base_url}/v1/monitors/stats",
         "boundaries": [
+            "Python code runs in a short-lived upstream sandbox isolated from this service host; outbound network policy remains supplier-controlled.",
             "Procurement returns derived fields and source links, never raw supplier payloads.",
             "Supplier endpoints, Base USDC, exact scheme, and maximum prices are pinned; BlockRun's recipient is pinned, while Tavily supplies a validated request-scoped recipient.",
             "Source Watch supports public HTTPS text-like sources only.",
@@ -2738,6 +2892,149 @@ def form_d_funding_leads(
     return prepared.result
 
 
+@app.post("/v1/compute/python-run/quote")
+def quote_python_run(payload: PythonRunRequest) -> dict[str, Any]:
+    return {
+        "available": PROCUREMENT_READY,
+        "path": "/v1/compute/python-run",
+        "price": X402_PYTHON_RUN_PRICE,
+        "currency": "USDC",
+        "network": X402_NETWORK,
+        "input": {
+            "code_sha256": f"sha256:{hashlib.sha256(payload.code.encode('utf-8')).hexdigest()}",
+            "code_characters": len(payload.code),
+            "timeout_seconds": payload.timeout_seconds,
+        },
+        "supplier_plan": [
+            {
+                "capability": "create ephemeral Python 3.11 sandbox",
+                "supplier": "BlockRun Modal sandbox via x402",
+                "maximum_cost_usd": "0.011",
+            },
+            {
+                "capability": "execute one Python command",
+                "supplier": "BlockRun Modal sandbox via x402",
+                "maximum_cost_usd": "0.002",
+            },
+            {
+                "capability": "terminate sandbox",
+                "supplier": "BlockRun Modal sandbox via x402",
+                "maximum_cost_usd": "0.002",
+            },
+        ],
+        "maximum_supplier_cost_usd": "0.015",
+        "limits": {
+            "runtime": "python:3.11",
+            "maximum_code_characters": 6000,
+            "maximum_timeout_seconds": 30,
+            "maximum_output_bytes": 262144,
+            "cpu": 1.0,
+            "memory_mb": 512,
+        },
+    }
+
+
+@app.get("/v1/compute/python-run/sample")
+def sample_python_run() -> dict[str, Any]:
+    return {
+        "sample": True,
+        "request": PYTHON_RUN_PROBE_PAYLOAD,
+        "quote_url": f"{PUBLIC_BASE_URL.rstrip('/')}/v1/compute/python-run/quote",
+        "paid_path": "/v1/compute/python-run",
+        "price": X402_PYTHON_RUN_PRICE,
+        "economics": {
+            "maximum_supplier_cost_usd": "0.015",
+            "maximum_gross_margin_usd": "0.015",
+        },
+        "example_result": {
+            "product": "ISOLATED_PYTHON_RUN",
+            "decision": "PYTHON_EXECUTION_COMPLETED",
+            "execution": {
+                "returncode": 0,
+                "stdout": '{"answer": 55}\n',
+                "stderr": "",
+                "timed_out": False,
+            },
+            "sandbox": {
+                "runtime": "python:3.11",
+                "isolated_from_service_host": True,
+                "termination": "FULFILLED",
+            },
+            "supplier_execution": [
+                {"supplier": "blockrun-sandbox-create", "status": "FULFILLED"},
+                {"supplier": "blockrun-sandbox-exec", "status": "FULFILLED"},
+                {
+                    "supplier": "blockrun-sandbox-terminate",
+                    "status": "FULFILLED",
+                },
+            ],
+            "receipt": {"algorithm": "Ed25519"},
+        },
+    }
+
+
+@app.post(
+    "/v1/compute/python-run",
+    include_in_schema=PROCUREMENT_READY,
+)
+async def run_python(
+    request: Request,
+    payload: PythonRunRequest,
+) -> dict[str, Any]:
+    if not PROCUREMENT_READY:
+        raise HTTPException(
+            status_code=503,
+            detail="The isolated Python execution experiment is not activated",
+        )
+    payment_signature = request.headers.get("payment-signature") or request.headers.get(
+        "x-payment"
+    )
+    if not payment_signature:
+        raise HTTPException(
+            status_code=500, detail="Verified payment proof unavailable"
+        )
+    request_hash = hashlib.sha256(
+        json.dumps(
+            payload.model_dump(mode="json"),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    if not await run_in_threadpool(
+        evidence_service.bind_payment_request,
+        payment_signature,
+        request_hash,
+        request.url.path,
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Payment proof is already bound to a different request",
+        )
+    try:
+        prepared, direct_cost = await procurement_broker_service.build_python_run(
+            payload, payment_signature
+        )
+    except ProcurementBrokerError as exc:
+        request.state.evidence_direct_cost_usd = exc.direct_cost_usd
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "detail": exc.detail},
+        ) from exc
+    request.state.evidence_prepared = prepared
+    request.state.evidence_direct_cost_usd = direct_cost
+    if not await run_in_threadpool(
+        evidence_service.bind_payment,
+        payment_signature,
+        prepared,
+        request.url.path,
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Payment proof is already bound to a different request",
+        )
+    return prepared.result
+
+
 @app.post("/v1/procure/company-profile/quote")
 def quote_company_profile_procurement(
     payload: CompanyProfileProcurementRequest,
@@ -2792,9 +3089,7 @@ def sample_company_profile_procurement() -> dict[str, Any]:
                 "contradictions": [],
                 "source_urls": ["https://stripe.com"],
             },
-            "source_records": [
-                {"title": "Stripe", "url": "https://stripe.com"}
-            ],
+            "source_records": [{"title": "Stripe", "url": "https://stripe.com"}],
             "supplier_execution": [
                 {"supplier": "tavily-x402", "status": "FULFILLED"},
                 {"supplier": "blockrun-x402", "status": "FULFILLED"},
@@ -3002,6 +3297,7 @@ def summary() -> dict[str, Any]:
     return {
         "service": "Agent Procurement and Evidence API",
         "products": [
+            *(["/v1/compute/python-run"] if PROCUREMENT_READY else []),
             *(["/v1/procure/company-profile"] if PROCUREMENT_READY else []),
             "/v1/monitors/source-change",
             "/v1/monitors/source-change-portfolio",
@@ -3087,7 +3383,9 @@ def custom_openapi() -> dict[str, Any]:
         "MonitorBearer"
     ] = {"type": "http", "scheme": "bearer"}
     schema["info"]["x-guidance"] = (
-        "Use POST /v1/procure/company-profile when an agent wants one stable "
+        "Use POST /v1/compute/python-run when an agent needs one bounded Python "
+        "execution without provisioning or managing a sandbox lifecycle. Use POST "
+        "/v1/procure/company-profile when an agent wants one stable "
         "contract to select, pay, and normalize machine suppliers. Inspect the "
         "free quote route before payment. Use POST /v1/web/source-snapshot for a "
         "one-shot normalized public-source "
@@ -3175,6 +3473,15 @@ def custom_openapi() -> dict[str, Any]:
         },
     }
     if PROCUREMENT_READY:
+        paid_operations["/v1/compute/python-run"] = {
+            "price": f"{price_decimal(X402_PYTHON_RUN_PRICE):.6f}",
+            "example": PYTHON_RUN_PROBE_PAYLOAD,
+            "description": (
+                "Run bounded Python 3.11 code in an ephemeral isolated sandbox with "
+                "one x402 payment. Returns stdout, stderr, return code, supplier "
+                "settlements, termination state, hashes, and a signed receipt."
+            ),
+        }
         paid_operations["/v1/procure/company-profile"] = {
             "price": f"{price_decimal(X402_COMPANY_PROFILE_PRICE):.6f}",
             "example": COMPANY_PROFILE_PROBE_PAYLOAD,

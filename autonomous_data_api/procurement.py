@@ -35,6 +35,9 @@ TAVILY_URL = "https://x402.tavily.com/search"
 BLOCKRUN_URL = "https://blockrun.ai/api/v1/chat/completions"
 BLOCKRUN_PAY_TO = "0xe9030014F5DAe217d0A152f02A043567b16c1aBf"
 BLOCKRUN_MODEL = "deepseek/deepseek-chat"
+BLOCKRUN_SANDBOX_CREATE_URL = "https://blockrun.ai/api/v1/modal/sandbox/create"
+BLOCKRUN_SANDBOX_EXEC_URL = "https://blockrun.ai/api/v1/modal/sandbox/exec"
+BLOCKRUN_SANDBOX_TERMINATE_URL = "https://blockrun.ai/api/v1/modal/sandbox/terminate"
 
 
 @dataclass(frozen=True)
@@ -53,6 +56,24 @@ TAVILY_SUPPLIER = SupplierSpec(
     allow_request_scoped_recipient=True,
 )
 BLOCKRUN_SUPPLIER = SupplierSpec("blockrun", BLOCKRUN_URL, BLOCKRUN_PAY_TO)
+BLOCKRUN_SANDBOX_CREATE_SUPPLIER = SupplierSpec(
+    "blockrun-sandbox-create",
+    BLOCKRUN_SANDBOX_CREATE_URL,
+    BLOCKRUN_PAY_TO,
+    max_amount_atomic=11_000,
+)
+BLOCKRUN_SANDBOX_EXEC_SUPPLIER = SupplierSpec(
+    "blockrun-sandbox-exec",
+    BLOCKRUN_SANDBOX_EXEC_URL,
+    BLOCKRUN_PAY_TO,
+    max_amount_atomic=2_000,
+)
+BLOCKRUN_SANDBOX_TERMINATE_SUPPLIER = SupplierSpec(
+    "blockrun-sandbox-terminate",
+    BLOCKRUN_SANDBOX_TERMINATE_URL,
+    BLOCKRUN_PAY_TO,
+    max_amount_atomic=2_000,
+)
 
 
 def _normalize_company_name(value: Any) -> str:
@@ -144,6 +165,22 @@ class CompanyProfileProcurementRequest(BaseModel):
     @classmethod
     def normalize_ticker(cls, value: Any) -> str | None:
         return _normalize_ticker(value)
+
+
+class PythonRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: str = Field(min_length=1, max_length=6_000)
+    timeout_seconds: int = Field(default=10, ge=1, le=30)
+
+    @field_validator("code")
+    @classmethod
+    def validate_code(cls, value: str) -> str:
+        if "\x00" in value:
+            raise ValueError("code must not contain NUL bytes")
+        if not value.strip():
+            raise ValueError("code must not be blank")
+        return value
 
 
 class _Contradiction(BaseModel):
@@ -1000,6 +1037,85 @@ class ProcurementBrokerService:
             raise
         return derived, transaction, amount
 
+    async def _call_sandbox_create(
+        self, request: PythonRunRequest
+    ) -> tuple[dict[str, Any], str | None, int]:
+        payload, _body, transaction, amount = await self._call_json_supplier(
+            BLOCKRUN_SANDBOX_CREATE_SUPPLIER,
+            {
+                "image": "python:3.11",
+                "timeout": min(90, request.timeout_seconds + 45),
+                "cpu": 1.0,
+                "memory": 512,
+            },
+        )
+        sandbox_id = payload.get("sandbox_id")
+        if not isinstance(sandbox_id, str) or not re.fullmatch(
+            r"[A-Za-z0-9_-]{1,128}", sandbox_id
+        ):
+            raise ProcurementSupplierError(
+                "SANDBOX_CREATE_RESPONSE_INVALID",
+                "BlockRun returned no valid sandbox identifier",
+                amount_atomic=amount,
+            )
+        return {"sandbox_id": sandbox_id}, transaction, amount
+
+    async def _call_sandbox_exec(
+        self, request: PythonRunRequest, sandbox_id: str
+    ) -> tuple[dict[str, Any], str | None, int]:
+        payload, _body, transaction, amount = await self._call_json_supplier(
+            BLOCKRUN_SANDBOX_EXEC_SUPPLIER,
+            {
+                "sandbox_id": sandbox_id,
+                "command": ["python", "-I", "-c", request.code],
+                "timeout": request.timeout_seconds,
+            },
+        )
+        returncode = payload.get("returncode")
+        stdout = payload.get("stdout")
+        stderr = payload.get("stderr")
+        if (
+            not isinstance(returncode, int)
+            or not isinstance(stdout, str)
+            or not isinstance(stderr, str)
+        ):
+            raise ProcurementSupplierError(
+                "SANDBOX_EXEC_RESPONSE_INVALID",
+                "BlockRun returned no valid execution result",
+                amount_atomic=amount,
+            )
+        if len(stdout.encode("utf-8")) + len(stderr.encode("utf-8")) > 256 * 1024:
+            raise ProcurementSupplierError(
+                "SANDBOX_OUTPUT_TOO_LARGE",
+                "Sandbox output exceeded the 256 KiB result limit",
+                amount_atomic=amount,
+            )
+        return (
+            {
+                "returncode": returncode,
+                "stdout": stdout,
+                "stderr": stderr,
+            },
+            transaction,
+            amount,
+        )
+
+    async def _call_sandbox_terminate(
+        self, sandbox_id: str
+    ) -> tuple[dict[str, Any], str | None, int]:
+        payload, _body, transaction, amount = await self._call_json_supplier(
+            BLOCKRUN_SANDBOX_TERMINATE_SUPPLIER,
+            {"sandbox_id": sandbox_id},
+        )
+        status = payload.get("status")
+        if status not in {"terminated", "not_found"}:
+            raise ProcurementSupplierError(
+                "SANDBOX_TERMINATE_RESPONSE_INVALID",
+                "BlockRun did not confirm sandbox termination",
+                amount_atomic=amount,
+            )
+        return {"status": status}, transaction, amount
+
     async def _attempt_supplier(
         self,
         payment_hash: str,
@@ -1164,6 +1280,100 @@ class ProcurementBrokerService:
                 raise ProcurementBrokerError(
                     "PROCUREMENT_RESULT_PREPARATION_FAILED",
                     "The procured result could not be prepared safely",
+                    502,
+                    direct_cost_usd=Decimal(total_cost) / USDC_ATOMIC_UNITS,
+                ) from exc
+            await run_in_threadpool(
+                self._finish_request, payment_hash, prepared, total_cost
+            )
+            return prepared, Decimal(total_cost) / USDC_ATOMIC_UNITS
+
+    async def build_python_run(
+        self,
+        request: PythonRunRequest,
+        payment_proof: str,
+    ) -> tuple[PreparedResult, Decimal]:
+        if not self.configured:
+            raise ProcurementBrokerError(
+                "PROCUREMENT_WALLET_NOT_CONFIGURED",
+                "The procurement supplier wallet or daily budget is not configured",
+                503,
+            )
+        request_payload = request.model_dump(mode="json")
+        request_hash = hashlib.sha256(_canonical_json(request_payload)).hexdigest()
+        async with self.lock:
+            payment_hash, replay = await run_in_threadpool(
+                self._begin_or_replay, payment_proof, request_hash
+            )
+            if replay is not None:
+                return replay, Decimal(0)
+
+            create_record, create_cost = await self._attempt_supplier(
+                payment_hash,
+                request_hash,
+                BLOCKRUN_SANDBOX_CREATE_SUPPLIER,
+                lambda: self._call_sandbox_create(request),
+            )
+            if create_record["status"] != "FULFILLED":
+                await run_in_threadpool(
+                    self._fail_request,
+                    payment_hash,
+                    create_record["error_code"],
+                    create_cost,
+                )
+                raise ProcurementBrokerError(
+                    "SANDBOX_CREATE_FAILED",
+                    "The isolated Python sandbox could not be created",
+                    502,
+                    direct_cost_usd=Decimal(create_cost) / USDC_ATOMIC_UNITS,
+                )
+
+            sandbox_id = create_record["payload"]["sandbox_id"]
+            exec_record, exec_cost = await self._attempt_supplier(
+                payment_hash,
+                request_hash,
+                BLOCKRUN_SANDBOX_EXEC_SUPPLIER,
+                lambda: self._call_sandbox_exec(request, sandbox_id),
+            )
+            terminate_record, terminate_cost = await self._attempt_supplier(
+                payment_hash,
+                request_hash,
+                BLOCKRUN_SANDBOX_TERMINATE_SUPPLIER,
+                lambda: self._call_sandbox_terminate(sandbox_id),
+            )
+            total_cost = create_cost + exec_cost + terminate_cost
+            if exec_record["status"] != "FULFILLED":
+                await run_in_threadpool(
+                    self._fail_request,
+                    payment_hash,
+                    exec_record["error_code"],
+                    total_cost,
+                )
+                raise ProcurementBrokerError(
+                    "SANDBOX_EXECUTION_FAILED",
+                    "The isolated Python execution supplier did not fulfil the request",
+                    502,
+                    direct_cost_usd=Decimal(total_cost) / USDC_ATOMIC_UNITS,
+                )
+
+            supplier_records = [create_record, exec_record, terminate_record]
+            try:
+                prepared = await run_in_threadpool(
+                    self.evidence_service.prepare_python_run_procurement,
+                    request_payload,
+                    supplier_records,
+                )
+            except Exception as exc:
+                await run_in_threadpool(
+                    self._fail_request,
+                    payment_hash,
+                    "PYTHON_RUN_RESULT_PREPARATION_FAILED",
+                    total_cost,
+                    status="UNKNOWN",
+                )
+                raise ProcurementBrokerError(
+                    "PYTHON_RUN_RESULT_PREPARATION_FAILED",
+                    "The execution result could not be prepared safely",
                     502,
                     direct_cost_usd=Decimal(total_cost) / USDC_ATOMIC_UNITS,
                 ) from exc

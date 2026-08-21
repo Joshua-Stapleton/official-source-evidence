@@ -10,6 +10,9 @@ import pytest
 from autonomous_data_api.evidence import PreparedResult
 from autonomous_data_api.procurement import (
     BLOCKRUN_PAY_TO,
+    BLOCKRUN_SANDBOX_CREATE_SUPPLIER,
+    BLOCKRUN_SANDBOX_EXEC_SUPPLIER,
+    BLOCKRUN_SANDBOX_TERMINATE_SUPPLIER,
     BLOCKRUN_SUPPLIER,
     SUPPLIER_ASSET,
     TAVILY_SUPPLIER,
@@ -17,6 +20,7 @@ from autonomous_data_api.procurement import (
     ProcurementBrokerError,
     ProcurementBrokerService,
     ProcurementSupplierError,
+    PythonRunRequest,
 )
 
 
@@ -50,6 +54,30 @@ class FakeEvidenceService:
             product="company_profile_procurement",
             request_hash=request_hash,
             source_bundle_hash="source-bundle",
+            result_hash=result_hash,
+            result=result,
+        )
+
+    def prepare_python_run_procurement(self, request_payload, supplier_records):
+        self.prepare_calls += 1
+        self.supplier_records = supplier_records
+        result = {
+            "product": "ISOLATED_PYTHON_RUN",
+            "request": request_payload,
+            "suppliers": supplier_records,
+            "execution": supplier_records[1]["payload"],
+        }
+        request_hash = hashlib.sha256(
+            json.dumps(request_payload, sort_keys=True).encode()
+        ).hexdigest()
+        result_hash = hashlib.sha256(
+            json.dumps(result, sort_keys=True).encode()
+        ).hexdigest()
+        return PreparedResult(
+            request_id=f"python-request-{self.prepare_calls}",
+            product="isolated_python_run",
+            request_hash=request_hash,
+            source_bundle_hash="python-source-bundle",
             result_hash=result_hash,
             result=result,
         )
@@ -196,6 +224,30 @@ def test_blockrun_pins_exact_recipient_and_x402_version():
         )
 
 
+def test_sandbox_suppliers_pin_stage_specific_maximum_prices():
+    for supplier, amount in [
+        (BLOCKRUN_SANDBOX_CREATE_SUPPLIER, "11000"),
+        (BLOCKRUN_SANDBOX_EXEC_SUPPLIER, "2000"),
+        (BLOCKRUN_SANDBOX_TERMINATE_SUPPLIER, "2000"),
+    ]:
+        valid = requirement(amount=amount, pay_to=BLOCKRUN_PAY_TO)
+        assert (
+            ProcurementBrokerService._select_payment_requirement(supplier, 2, [valid])
+            is valid
+        )
+        with pytest.raises(ProcurementBrokerError):
+            ProcurementBrokerService._select_payment_requirement(
+                supplier,
+                2,
+                [
+                    requirement(
+                        amount=str(int(amount) + 1),
+                        pay_to=BLOCKRUN_PAY_TO,
+                    )
+                ],
+            )
+
+
 @pytest.mark.parametrize(
     "domain",
     [
@@ -225,6 +277,16 @@ def test_request_normalizes_fields():
     assert normalized.company_name == "Example Corporation"
     assert normalized.domain == "buecher.de"
     assert normalized.ticker == "EXM"
+
+
+def test_python_run_request_is_strict_and_bounded():
+    assert PythonRunRequest(code="print(1)").timeout_seconds == 10
+    with pytest.raises(ValueError):
+        PythonRunRequest(code="   ")
+    with pytest.raises(ValueError):
+        PythonRunRequest(code="print(1)", timeout_seconds=31)
+    with pytest.raises(ValueError):
+        PythonRunRequest(code="x" * 6001)
 
 
 def test_daily_cap_is_atomic_across_separate_supplier_reservations(tmp_path):
@@ -353,6 +415,90 @@ def test_tavily_failure_fails_without_calling_blockrun(tmp_path):
     assert captured.value.code == "PROCUREMENT_SOURCE_SUPPLIER_FAILED"
     assert captured.value.direct_cost_usd == Decimal(0)
     assert blockrun_calls == 0
+    assert evidence.prepare_calls == 0
+
+
+def test_python_run_bundles_lifecycle_and_replays_without_new_spend(tmp_path):
+    service, evidence = broker(tmp_path)
+    calls = []
+
+    async def create(run_request):
+        calls.append(("create", run_request.timeout_seconds))
+        return {"sandbox_id": "sb-test"}, "0xcreate", 11_000
+
+    async def execute(run_request, sandbox_id):
+        calls.append(("exec", sandbox_id, run_request.code))
+        return (
+            {"returncode": 0, "stdout": "55\n", "stderr": ""},
+            "0xexec",
+            2_000,
+        )
+
+    async def terminate(sandbox_id):
+        calls.append(("terminate", sandbox_id))
+        return {"status": "terminated"}, "0xterminate", 2_000
+
+    service._call_sandbox_create = create
+    service._call_sandbox_exec = execute
+    service._call_sandbox_terminate = terminate
+    run_request = PythonRunRequest(code="print(sum(range(11)))", timeout_seconds=5)
+
+    async def scenario():
+        first = await service.build_python_run(run_request, "python-payment")
+        replay = await service.build_python_run(run_request, "python-payment")
+        return first, replay
+
+    (prepared, cost), (replayed, replay_cost) = asyncio.run(scenario())
+
+    assert prepared == replayed
+    assert prepared.result["execution"]["stdout"] == "55\n"
+    assert cost == Decimal("0.015")
+    assert replay_cost == Decimal(0)
+    assert calls == [
+        ("create", 5),
+        ("exec", "sb-test", "print(sum(range(11)))"),
+        ("terminate", "sb-test"),
+    ]
+    assert [record["status"] for record in evidence.supplier_records] == [
+        "FULFILLED",
+        "FULFILLED",
+        "FULFILLED",
+    ]
+
+
+def test_python_run_exec_failure_still_terminates_sandbox(tmp_path):
+    service, evidence = broker(tmp_path)
+    terminated = []
+
+    async def create(_request):
+        return {"sandbox_id": "sb-test"}, "0xcreate", 11_000
+
+    async def execute(_request, _sandbox_id):
+        raise ProcurementSupplierError(
+            "SUPPLIER_REQUEST_FAILED",
+            "sandbox execution failed",
+            amount_atomic=2_000,
+        )
+
+    async def terminate(sandbox_id):
+        terminated.append(sandbox_id)
+        return {"status": "terminated"}, "0xterminate", 2_000
+
+    service._call_sandbox_create = create
+    service._call_sandbox_exec = execute
+    service._call_sandbox_terminate = terminate
+
+    with pytest.raises(ProcurementBrokerError) as captured:
+        asyncio.run(
+            service.build_python_run(
+                PythonRunRequest(code="raise RuntimeError('boom')"),
+                "python-payment",
+            )
+        )
+
+    assert captured.value.code == "SANDBOX_EXECUTION_FAILED"
+    assert captured.value.direct_cost_usd == Decimal("0.015")
+    assert terminated == ["sb-test"]
     assert evidence.prepare_calls == 0
 
 

@@ -7,6 +7,9 @@ are in [`FORM_D_EXPERIMENT.md`](FORM_D_EXPERIMENT.md).
 
 Paid candidates:
 
+- `POST /v1/compute/python-run` at `$0.03` USDC. It bundles sandbox creation,
+  one bounded Python execution, and termination, with at most `$0.015` upstream
+  x402 supplier cost per fulfilled request.
 - `POST /v1/procure/company-profile` at `$0.25` USDC. It purchases bounded
   retrieval and schema-constrained normalization from pinned x402 suppliers,
   with at most `$0.02` expected supplier cost per fulfilled request.
@@ -25,6 +28,15 @@ Paid candidates:
 The PFAS and grid lead endpoints remain available for prior API-key experiments, but their x402 routes return `410 RETIRED_WEDGE` and are not promoted in the agent manifest.
 
 ## Product Boundaries
+
+The Python runner accepts only Python source code, not arbitrary host commands.
+It caps source length at 6,000 characters, runtime at 30 seconds, combined
+stdout/stderr at 256 KiB, and provisions at most one CPU and 512 MB. Code runs in
+a short-lived BlockRun/Modal sandbox isolated from this service host. The
+upstream controls outbound network policy. The service pins all three supplier
+routes, the Base USDC asset, recipient, and maximum stage prices, and attempts
+termination even when execution fails. See
+[`PYTHON_RUN_EXPERIMENT.md`](PYTHON_RUN_EXPERIMENT.md).
 
 The company-profile procurement route is a brokered execution experiment. It
 uses Tavily only for bounded source discovery and BlockRun only for
@@ -91,6 +103,11 @@ request before supplier execution, returns a stored completed result on an
 identical retry without buying again, and rejects proof reuse with another
 request.
 
+The Python runner uses the same payment-proof replay and supplier-spend ledger.
+One customer payment can reserve at most `$0.015` across create, execute, and
+terminate. A completed identical retry replays the stored response without
+buying another sandbox.
+
 For directory and uptime monitoring, an empty unauthenticated `POST` is a
 supported probe for all paid routes. It uses the route's published Bazaar
 example request and returns the normal 402 challenge. A literal `{}`, malformed
@@ -118,6 +135,7 @@ uvicorn autonomous_data_api.app:app --host 127.0.0.1 --port 8765 --reload
 
 Useful local URLs:
 
+- `http://127.0.0.1:8765/v1/compute/python-run/sample`
 - `http://127.0.0.1:8765/v1/procure/company-profile/sample`
 - `http://127.0.0.1:8765/docs`
 - `http://127.0.0.1:8765/.well-known/agent-service.json`

@@ -3,8 +3,8 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Capability Procurement and Evidence APIs for Agents</title>
-    <meta name="description" content="Brokered company research, public source extraction, thirty-day monitoring, SEC signals, and OFAC evidence for autonomous agents, payable with no account or API key.">
+    <title>Isolated Compute and Capability Procurement for Agents</title>
+    <meta name="description" content="One-call isolated Python execution, brokered machine work, source monitoring, and factual evidence for autonomous agents, payable with no account or API key.">
     <meta name="robots" content="index,follow">
     <link rel="canonical" href="https://evidence.regulavita.com/">
     <link rel="icon" href="/favicon.ico">
@@ -21,7 +21,7 @@
         "@type": "SoftwareApplication",
         "name": "Agent Procurement and Evidence",
         "applicationCategory": "DeveloperApplication",
-        "description": "Brokered machine-service procurement, public source extraction, long-running monitoring, SEC signals, and OFAC evidence for autonomous agents.",
+        "description": "One-call isolated Python execution, brokered machine-service procurement, public source extraction, long-running monitoring, SEC signals, and OFAC evidence for autonomous agents.",
         "url": "https://evidence.regulavita.com/",
         "image": "https://evidence.regulavita.com/icon.png",
         "provider": {"@type": "Organization", "name": "Regulavita"},
@@ -382,8 +382,8 @@
       <div class="hero">
         <div class="shell">
           <div class="eyebrow"><span class="live-dot"></span>Live on Base mainnet</div>
-          <h1>Procure Machine Work in One Call</h1>
-          <p class="lead">Delegate provider selection, x402 supplier payment, normalization, and signed delivery for a company profile, or use the existing source monitoring and official-evidence APIs. No account, API key, or human checkout.</p>
+          <h1>Run Isolated Python in One Paid Call</h1>
+          <p class="lead">Send bounded Python code, pay once, and receive stdout, stderr, return code, supplier settlements, and a signed receipt. The service creates and terminates the sandbox for you. Existing procurement, monitoring, and evidence APIs remain live.</p>
           <div class="actions">
             <a class="action" href="/docs">Open API docs</a>
             <a class="action secondary" href="/.well-known/agent-service.json">Read machine manifest</a>
@@ -402,9 +402,18 @@
         <div class="shell">
           <div class="section-heading">
             <h2>Paid endpoints</h2>
-            <p class="section-note">Use procurement when the agent needs an outcome from multiple machine suppliers. Existing monitoring and evidence experiments remain available unchanged.</p>
+            <p class="section-note">Use isolated compute when an agent needs execution rather than more public information. Existing procurement, monitoring, and evidence experiments remain available unchanged.</p>
           </div>
           <div class="endpoint-list">
+            <article class="endpoint">
+              <span class="method">POST</span>
+              <div>
+                <span class="endpoint-path">/v1/compute/python-run</span>
+                <p class="endpoint-copy">Run up to 6,000 characters of Python 3.11 for up to 30 seconds in an ephemeral upstream sandbox. One payment covers create, execute, and terminate; the result includes output, return code, settlement provenance, and a signed receipt.</p>
+                <div class="endpoint-links"><a href="/v1/compute/python-run/sample">Free sample</a><a href="/docs#/default/run_python_v1_compute_python_run_post">Open schema</a></div>
+              </div>
+              <div class="price">$0.03<small>per isolated run</small></div>
+            </article>
             <article class="endpoint">
               <span class="method">POST</span>
               <div>
@@ -492,9 +501,9 @@
 
       <div class="proof-band">
         <div class="shell proof-grid">
-          <div class="proof-item"><strong>Brokered execution</strong><p>The procurement route selects and pays pinned suppliers, then returns one normalized machine contract.</p></div>
-          <div class="proof-item"><strong>Bounded exposure</strong><p>Supplier endpoints, Base USDC and maximum prices are fixed, with validated recipients, a separate daily spend cap and explicit partial results.</p></div>
-          <div class="proof-item"><strong>Signed delivery</strong><p>Outputs include source links, supplier settlements, response hashes, contradictions and an Ed25519 receipt.</p></div>
+          <div class="proof-item"><strong>One-call execution</strong><p>The compute route creates, uses, and terminates an isolated Python sandbox behind one paid contract.</p></div>
+          <div class="proof-item"><strong>Bounded exposure</strong><p>Runtime, output, supplier endpoints, Base USDC, maximum prices, and daily supplier spend are fixed.</p></div>
+          <div class="proof-item"><strong>Auditable delivery</strong><p>Outputs include supplier settlements, response hashes, termination state, and an Ed25519 receipt.</p></div>
         </div>
       </div>
     </main>

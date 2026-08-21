@@ -50,6 +50,7 @@ SEC_PARSER_VERSION = "sec-trigger-delta/0.2.0"
 FORM_D_PARSER_VERSION = "sec-form-d-funding-leads/0.1.0"
 FORM_D_DOSSIER_PARSER_VERSION = "sec-form-d-company-dossier/0.1.0"
 PROCUREMENT_PROFILE_VERSION = "company-profile-procurement/0.1.0"
+PYTHON_RUN_VERSION = "isolated-python-run/0.1.0"
 OFAC_PARSER_VERSION = "ofac-exact/0.2.0"
 OFAC_FRESHNESS_SECONDS = 900
 MAX_SEC_FILINGS = 10
@@ -2120,6 +2121,98 @@ class EvidenceService:
             result_core,
         )
 
+    def prepare_python_run_procurement(
+        self,
+        request_payload: dict[str, Any],
+        supplier_records: list[dict[str, Any]],
+    ) -> PreparedResult:
+        request_hash = sha256_json(request_payload)
+        exec_record = next(
+            (
+                record
+                for record in supplier_records
+                if record.get("supplier") == "blockrun-sandbox-exec"
+                and record.get("status") == "FULFILLED"
+                and isinstance(record.get("payload"), dict)
+            ),
+            None,
+        )
+        if exec_record is None:
+            raise SourceSchemaError("no sandbox execution result was returned")
+        execution = exec_record["payload"]
+        source_bundle_hash = sha256_json(
+            {
+                "engine_version": PYTHON_RUN_VERSION,
+                "suppliers": [
+                    {
+                        "supplier": str(record.get("supplier") or "")[:100],
+                        "endpoint": str(record.get("endpoint") or "")[:500],
+                        "status": str(record.get("status") or "")[:50],
+                        "response_sha256": (
+                            f"sha256:{sha256_json(record['payload'])}"
+                            if isinstance(record.get("payload"), dict)
+                            else None
+                        ),
+                    }
+                    for record in supplier_records
+                ],
+            }
+        )
+        supplier_execution = [
+            {
+                "supplier": str(record.get("supplier") or "unknown")[:100],
+                "endpoint": str(record.get("endpoint") or "")[:500],
+                "status": str(record.get("status") or "UNKNOWN")[:50],
+                "price_usd": str(record.get("price_usd") or "0")[:20],
+                "settlement_transaction": str(
+                    record.get("settlement_transaction") or ""
+                )[:200]
+                or None,
+                "error_code": str(record.get("error_code") or "")[:100] or None,
+            }
+            for record in supplier_records
+        ]
+        result_core = {
+            "product": "ISOLATED_PYTHON_RUN",
+            "decision": "PYTHON_EXECUTION_COMPLETED",
+            "execution": {
+                "returncode": execution["returncode"],
+                "stdout": execution["stdout"],
+                "stderr": execution["stderr"],
+                "timed_out": False,
+            },
+            "request": {
+                "code_sha256": f"sha256:{sha256_bytes(request_payload['code'].encode('utf-8'))}",
+                "code_characters": len(request_payload["code"]),
+                "timeout_seconds": request_payload["timeout_seconds"],
+            },
+            "sandbox": {
+                "runtime": "python:3.11",
+                "isolated_from_service_host": True,
+                "maximum_cpu": 1.0,
+                "memory_mb": 512,
+                "termination": str(supplier_records[-1].get("status") or "UNKNOWN"),
+            },
+            "supplier_execution": supplier_execution,
+            "provenance": {
+                "engine_version": PYTHON_RUN_VERSION,
+                "request_sha256": f"sha256:{request_hash}",
+                "source_bundle_sha256": f"sha256:{source_bundle_hash}",
+                "result_sha256": None,
+            },
+            "limitations": [
+                "The sandbox is isolated from this service host, but outbound network access is controlled by the upstream runtime.",
+                "A zero return code is process completion, not a correctness guarantee.",
+                "The signed receipt attests to the returned bytes and supplier-response hashes.",
+            ],
+        }
+        return self._store_prepared(
+            "isolated_python_run",
+            request_hash,
+            source_bundle_hash,
+            result_core,
+        )
+
     def prepare_web_monitor(self, request: WebMonitorCreateRequest) -> PreparedResult:
         request_payload = request.model_dump(mode="json")
         request_hash = sha256_json(request_payload)
@@ -3139,6 +3232,26 @@ class EvidenceService:
             return status
 
         route_metadata = {
+            "/v1/compute/python-run": {
+                "tier": "brokered-isolated-compute",
+                "price_usd": "0.03",
+                "cohort_start_utc": os.getenv(
+                    "AUTONOMOUS_PYTHON_RUN_EXPERIMENT_START_UTC", ""
+                )
+                or None,
+                "hypothesis": (
+                    "Agents will repeatedly pay a one-call broker to create, run, "
+                    "and terminate an isolated Python sandbox behind one contract."
+                ),
+                "scale_gate": (
+                    "At least three independent payer clusters or one independent "
+                    "repeat buyer across UTC days within 21 days."
+                ),
+                "stop_gate": (
+                    "Stop or redesign after 21 days or 500 independent non-crawler "
+                    "payment challenges with zero independent purchases."
+                ),
+            },
             "/v1/procure/company-profile": {
                 "tier": "brokered-capability",
                 "price_usd": "0.25",

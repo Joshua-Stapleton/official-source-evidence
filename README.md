@@ -1,6 +1,6 @@
-# Agent Procurement, Evidence, Source Watch, and GTM Signals
+# Isolated Compute, Agent Procurement, Evidence, Source Watch, and GTM Signals
 
-Brokered machine-service procurement, long-running monitoring jobs, and
+One-call isolated Python execution, brokered machine-service procurement, long-running monitoring jobs, and
 pay-per-call official-source signals and evidence for autonomous agents. No
 account, API key, or sales call.
 
@@ -19,6 +19,7 @@ actions are recorded in
 
 | Endpoint | Result | Price |
 | --- | --- | ---: |
+| `POST /v1/compute/python-run` | Run bounded Python 3.11 code in an ephemeral isolated sandbox; one payment covers create, execute, and terminate and returns output, supplier settlements, hashes, and a signed receipt | $0.03 USDC |
 | `POST /v1/procure/company-profile` | Procure bounded company retrieval and schema-constrained normalization from pinned x402 suppliers, with derived fields, source links, contradictions, supplier settlements, partial-failure state, hashes, and a signed receipt | $0.25 USDC |
 | `POST /v1/web/source-snapshot` | One-shot normalized extraction from a public HTTPS HTML, JSON, XML, or text source, with optional literal excerpts, a content hash, and a signed receipt | $0.03 USDC |
 | `POST /v1/monitors/source-change` | Monitor one public HTTPS text, HTML, JSON, or XML source every six hours for 30 days, with private polling and optional signed webhooks | $1.00 USDC |
@@ -38,6 +39,11 @@ wrapper. A free quote at `POST /v1/procure/company-profile/quote` exposes the
 fixed customer price, supplier plan, maximum supplier cost, and partial-result
 policy before payment. The hypothesis and stop/scale gates are pre-registered
 in [PROCUREMENT_EXPERIMENT.md](autonomous_data_api/PROCUREMENT_EXPERIMENT.md).
+
+The isolated Python experiment compresses a three-payment sandbox lifecycle into
+one buyer call. A free quote exposes the fixed `$0.03` customer price and maximum
+`$0.015` supplier cost before payment. The bounded hypothesis and gates are in
+[PYTHON_RUN_EXPERIMENT.md](autonomous_data_api/PYTHON_RUN_EXPERIMENT.md).
 
 Source Watch is a long-running job rather than a lookup. It accepts only public
 HTTPS sources, does not follow redirects, caps each response at 1 MB, stores
@@ -64,6 +70,7 @@ Inspect the free contracts before paying:
 
 ```bash
 curl https://evidence.regulavita.com/v1/ofac/sample
+curl https://evidence.regulavita.com/v1/compute/python-run/sample
 curl https://evidence.regulavita.com/v1/procure/company-profile/sample
 curl https://evidence.regulavita.com/v1/sec/sample
 curl https://evidence.regulavita.com/v1/gtm/form-d-funding-leads/sample
