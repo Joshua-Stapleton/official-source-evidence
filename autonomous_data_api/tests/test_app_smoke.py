@@ -29,6 +29,7 @@ from autonomous_data_api.app import (
     SOURCE_SNAPSHOT_PROBE_PAYLOAD,
     SOURCE_WATCH_PROBE_PAYLOAD,
     CdpFacilitatorAuthProvider,
+    EvidencePrecomputeMiddleware,
     MainnetRevenueCapMiddleware,
     app,
     evidence_service,
@@ -37,6 +38,7 @@ from autonomous_data_api.app import (
     payment_failure_reason_code,
 )
 from autonomous_data_api.evidence import PreparedResult, SourceStaleError
+from autonomous_data_api.procurement import PythonRunRequest
 
 
 @pytest.fixture
@@ -642,12 +644,48 @@ def test_nonempty_invalid_json_is_still_rejected_before_payment(client):
     assert response.json()["error"]["code"] == "INVALID_JSON"
 
 
-def test_empty_json_object_is_still_rejected_before_payment(client):
-    response = client.post("/v1/ofac/exact-identifier-evidence", json={})
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/v1/gtm/form-d-funding-leads",
+        "/v1/ofac/exact-identifier-evidence",
+    ],
+)
+def test_empty_json_object_is_a_marketplace_payment_probe(client, prepared, path):
+    response = client.post(path, json={})
 
-    assert response.status_code == 422
-    assert "payment-required" not in response.headers
-    assert response.json()["error"]["code"] == "INVALID_INPUT"
+    assert response.status_code == 402
+    challenge = decode_challenge(response)
+    assert challenge["resource"]["url"].endswith(path)
+
+
+def test_post_payment_marketplace_probe_uses_declared_input(monkeypatch):
+    probe_payload = {"code": "print(42)", "timeout_seconds": 5}
+    mini_app = FastAPI()
+
+    @mini_app.post("/v1/compute/python-run")
+    def challenge(request: Request, payload: dict | None = None):
+        del payload
+        assert isinstance(request.state.evidence_validated, PythonRunRequest)
+        return Response(status_code=402)
+
+    monkeypatch.setattr(
+        EvidencePrecomputeMiddleware,
+        "POST_PAYMENT_ROUTES",
+        {
+            "/v1/compute/python-run": (
+                PythonRunRequest,
+                "$0.03",
+                probe_payload,
+            )
+        },
+    )
+    mini_app.add_middleware(EvidencePrecomputeMiddleware, service=evidence_service)
+
+    with TestClient(mini_app) as test_client:
+        response = test_client.post("/v1/compute/python-run", json={})
+
+    assert response.status_code == 402
 
 
 def test_legacy_fly_origin_retires_paid_routes_and_redirects_public_pages(client):

@@ -1769,6 +1769,9 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
         probe_payload: dict[str, Any],
     ) -> Response:
         started = time.monotonic()
+        payment_signature = request.headers.get(
+            "payment-signature"
+        ) or request.headers.get("x-payment")
         if os.getenv("AUTONOMOUS_EVIDENCE_ENABLED", "1") != "1":
             return JSONResponse(
                 status_code=503,
@@ -1804,6 +1807,11 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
                     status_code=400,
                     content={"error": {"code": "INVALID_JSON"}},
                 )
+        if not payment_signature and payload == {}:
+            payload = probe_payload
+            request._body = json.dumps(  # type: ignore[attr-defined]
+                probe_payload, separators=(",", ":")
+            ).encode("utf-8")
         if (
             len(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
             > maximum_body_bytes
@@ -1826,9 +1834,6 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
             )
         request.state.evidence_validated = validated
         response = await call_next(request)
-        payment_signature = request.headers.get(
-            "payment-signature"
-        ) or request.headers.get("x-payment")
         prepared: PreparedResult | None = getattr(
             request.state, "evidence_prepared", None
         )
@@ -1958,6 +1963,9 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
 
         model_class, prepare_method_name, quoted_price, probe_payload = route
         started = time.monotonic()
+        payment_signature = request.headers.get(
+            "payment-signature"
+        ) or request.headers.get("x-payment")
         body = await request.body()
         if not body:
             payload = probe_payload
@@ -1974,6 +1982,11 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
                         }
                     },
                 )
+        if not payment_signature and payload == {}:
+            payload = probe_payload
+            request._body = json.dumps(  # type: ignore[attr-defined]
+                probe_payload, separators=(",", ":")
+            ).encode("utf-8")
         if len(json.dumps(payload, separators=(",", ":")).encode("utf-8")) > 8192:
             return JSONResponse(
                 status_code=413,
@@ -1997,9 +2010,6 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
                 },
             )
         request.state.evidence_validated = validated
-        payment_signature = request.headers.get(
-            "payment-signature"
-        ) or request.headers.get("x-payment")
         try:
             if request.url.path == "/v1/web/source-snapshot" and not payment_signature:
                 prepare_method = self.service.prepare_public_source_snapshot_quote
@@ -2979,7 +2989,7 @@ def sample_python_run() -> dict[str, Any]:
 )
 async def run_python(
     request: Request,
-    payload: PythonRunRequest,
+    payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not PROCUREMENT_READY:
         raise HTTPException(
@@ -2993,6 +3003,9 @@ async def run_python(
         raise HTTPException(
             status_code=500, detail="Verified payment proof unavailable"
         )
+    payload = getattr(request.state, "evidence_validated", None)
+    if not isinstance(payload, PythonRunRequest):
+        raise HTTPException(status_code=422, detail="Python input is required")
     request_hash = hashlib.sha256(
         json.dumps(
             payload.model_dump(mode="json"),
@@ -3105,7 +3118,7 @@ def sample_company_profile_procurement() -> dict[str, Any]:
 )
 async def procure_company_profile(
     request: Request,
-    payload: CompanyProfileProcurementRequest,
+    payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not PROCUREMENT_READY:
         raise HTTPException(
@@ -3119,6 +3132,9 @@ async def procure_company_profile(
         raise HTTPException(
             status_code=500, detail="Verified payment proof unavailable"
         )
+    payload = getattr(request.state, "evidence_validated", None)
+    if not isinstance(payload, CompanyProfileProcurementRequest):
+        raise HTTPException(status_code=422, detail="Company input is required")
     request_hash = hashlib.sha256(
         json.dumps(
             payload.model_dump(mode="json"),
@@ -3481,6 +3497,7 @@ def custom_openapi() -> dict[str, Any]:
                 "one x402 payment. Returns stdout, stderr, return code, supplier "
                 "settlements, termination state, hashes, and a signed receipt."
             ),
+            "request_model": "PythonRunRequest",
         }
         paid_operations["/v1/procure/company-profile"] = {
             "price": f"{price_decimal(X402_COMPANY_PROFILE_PRICE):.6f}",
@@ -3490,6 +3507,7 @@ def custom_openapi() -> dict[str, Any]:
                 "normalization from pinned x402 suppliers, with source links, "
                 "contradictions, partial-failure state, hashes, and a signed receipt."
             ),
+            "request_model": "CompanyProfileProcurementRequest",
         }
     if GTM_DOSSIER_READY:
         paid_operations["/v1/gtm/form-d-company-dossier"] = {
@@ -3546,6 +3564,10 @@ def custom_openapi() -> dict[str, Any]:
                     .setdefault("application/json", {})
                 )
                 content["example"] = paid["example"]
+                if request_model := paid.get("request_model"):
+                    content["schema"] = {
+                        "$ref": f"#/components/schemas/{request_model}"
+                    }
             elif path == "/v1/monitors/{monitor_id}" and method in {"get", "delete"}:
                 operation["security"] = [{"MonitorBearer": []}]
             else:
