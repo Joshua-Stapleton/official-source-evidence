@@ -809,7 +809,11 @@ def test_conversion_experiment_excludes_probes_and_owner_payments(
                     f"request-{index}",
                     timestamp,
                     route,
-                    "request-hash",
+                    (
+                        "6dfe2d0796a21bec01be61cd6bba55c618d271a3b1e25e8d94130475d7a7f503"
+                        if index == 1
+                        else "request-hash"
+                    ),
                     "response-hash",
                     "source-hash",
                     price,
@@ -830,6 +834,14 @@ def test_conversion_experiment_excludes_probes_and_owner_payments(
     assert experiment["independent_revenue_usd"] == "1.03"
     assert experiment["independent_direct_cost_usd"] == "0.00"
     assert experiment["independent_gross_margin_usd"] == "1.03"
+    assert experiment["paid_catalog_sample_calls"] == 1
+    assert experiment["paid_catalog_sample_buyer_clusters"] == 1
+    assert experiment["paid_catalog_sample_revenue_usd"] == "0.01"
+    assert experiment["validated_product_demand_calls"] == 3
+    assert experiment["validated_product_demand_buyer_clusters"] == 3
+    assert experiment["validated_product_demand_repeat_buyers"] == 0
+    assert experiment["validated_product_demand_revenue_usd"] == "1.02"
+    assert experiment["validated_product_demand_max_buyer_call_share"] == 0.3333
     assert experiment["independent_paid_fulfillment_rate_percent"] == 80.0
     assert experiment["max_independent_buyer_call_share"] == 0.5
     assert experiment["gates"]["no_buyer_above_50_percent_of_calls"] is True
@@ -856,6 +868,10 @@ def test_conversion_experiment_excludes_probes_and_owner_payments(
     assert preflight["payment_challenges"] == 1
     assert preflight["independent_fulfilled_calls"] == 2
     assert preflight["repeat_independent_buyer_clusters"] == 1
+    assert preflight["paid_catalog_sample_calls"] == 1
+    assert preflight["paid_catalog_sample_revenue_usd"] == "0.01"
+    assert preflight["validated_product_demand_calls"] == 1
+    assert preflight["validated_product_demand_revenue_usd"] == "0.01"
     sec_signal = next(
         route
         for route in experiment["routes"]

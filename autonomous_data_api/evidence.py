@@ -48,6 +48,14 @@ OFAC_SOURCE_URLS = {
 }
 SEC_PARSER_VERSION = "sec-trigger-delta/0.2.0"
 FORM_D_PARSER_VERSION = "sec-form-d-funding-leads/0.1.0"
+CLEARLY_PUBLISHED_EXAMPLE_REQUEST_HASHES = frozenset(
+    {
+        "cadebf5dff6eb929195a1484118a75d4527d08dd58d98dc27f9afd9c39008e66",
+        "da427d1347c3266d956b5b52582e707b051761ee40e97003ea6bdd44d3ab2a1b",
+        "86f7e78a32c7764d5e681d728642fc898f5b3396a44b1f0147e8a476d552bcde",
+        "6dfe2d0796a21bec01be61cd6bba55c618d271a3b1e25e8d94130475d7a7f503",
+    }
+)
 FORM_D_DOSSIER_PARSER_VERSION = "sec-form-d-company-dossier/0.1.0"
 PROCUREMENT_PROFILE_VERSION = "company-profile-procurement/0.1.0"
 PYTHON_RUN_VERSION = "isolated-python-run/0.1.0"
@@ -3135,7 +3143,8 @@ class EvidenceService:
                 connection.execute(
                     """
                     SELECT route, timestamp_utc, quoted_price, payer_wallet_hmac,
-                           owner_or_test_flag, response_status, direct_cost_estimate
+                           canonical_request_hash, owner_or_test_flag,
+                           response_status, direct_cost_estimate
                     FROM evidence_attempts
                     WHERE timestamp_utc >= ?
                     ORDER BY timestamp_utc
@@ -3335,6 +3344,15 @@ class EvidenceService:
         owner_direct_cost = Decimal(0)
         independent_paid_attempts = 0
         independent_fulfilled = 0
+        catalog_sample_calls = 0
+        catalog_sample_revenue = Decimal(0)
+        catalog_sample_direct_cost = Decimal(0)
+        catalog_sample_payers: set[str] = set()
+        validated_demand_calls = 0
+        validated_demand_revenue = Decimal(0)
+        validated_demand_direct_cost = Decimal(0)
+        validated_demand_payer_days: dict[str, set[str]] = {}
+        validated_demand_payer_calls: dict[str, int] = {}
 
         for route, metadata in route_metadata.items():
             funnels[route] = {
@@ -3352,6 +3370,12 @@ class EvidenceService:
                 "independent_gross_margin_usd": "0.00",
                 "independent_paid_or_settlement_failures": 0,
                 "independent_paid_fulfillment_rate_percent": None,
+                "paid_catalog_sample_calls": 0,
+                "paid_catalog_sample_buyer_clusters": 0,
+                "paid_catalog_sample_revenue_usd": "0.00",
+                "validated_product_demand_calls": 0,
+                "validated_product_demand_buyer_clusters": 0,
+                "validated_product_demand_revenue_usd": "0.00",
             }
 
         route_payers: dict[str, set[str]] = {route: set() for route in funnels}
@@ -3370,6 +3394,18 @@ class EvidenceService:
         }
         route_independent_paid_attempts = {route: 0 for route in funnels}
         route_independent_fulfilled = {route: 0 for route in funnels}
+        route_catalog_sample_payers: dict[str, set[str]] = {
+            route: set() for route in funnels
+        }
+        route_catalog_sample_revenue: dict[str, Decimal] = {
+            route: Decimal(0) for route in funnels
+        }
+        route_validated_demand_payers: dict[str, set[str]] = {
+            route: set() for route in funnels
+        }
+        route_validated_demand_revenue: dict[str, Decimal] = {
+            route: Decimal(0) for route in funnels
+        }
 
         for row in cohort_rows:
             route = row["route"]
@@ -3423,6 +3459,28 @@ class EvidenceService:
                 price = Decimal(0)
             route_independent_revenue[route] += price
             independent_revenue += price
+            if (
+                row["canonical_request_hash"]
+                in CLEARLY_PUBLISHED_EXAMPLE_REQUEST_HASHES
+            ):
+                catalog_sample_calls += 1
+                catalog_sample_revenue += price
+                catalog_sample_direct_cost += direct_cost
+                catalog_sample_payers.add(payer)
+                funnels[route]["paid_catalog_sample_calls"] += 1
+                route_catalog_sample_payers[route].add(payer)
+                route_catalog_sample_revenue[route] += price
+            else:
+                validated_demand_calls += 1
+                validated_demand_revenue += price
+                validated_demand_direct_cost += direct_cost
+                validated_demand_payer_days.setdefault(payer, set()).add(day)
+                validated_demand_payer_calls[payer] = (
+                    validated_demand_payer_calls.get(payer, 0) + 1
+                )
+                funnels[route]["validated_product_demand_calls"] += 1
+                route_validated_demand_payers[route].add(payer)
+                route_validated_demand_revenue[route] += price
 
         for route, funnel in funnels.items():
             funnel["independent_buyer_clusters"] = len(route_payers[route])
@@ -3439,6 +3497,18 @@ class EvidenceService:
             funnel["owner_direct_cost_usd"] = f"{route_owner_direct_cost[route]:.2f}"
             funnel["independent_gross_margin_usd"] = (
                 f"{route_independent_revenue[route] - route_independent_direct_cost[route]:.2f}"
+            )
+            funnel["paid_catalog_sample_buyer_clusters"] = len(
+                route_catalog_sample_payers[route]
+            )
+            funnel["paid_catalog_sample_revenue_usd"] = (
+                f"{route_catalog_sample_revenue[route]:.2f}"
+            )
+            funnel["validated_product_demand_buyer_clusters"] = len(
+                route_validated_demand_payers[route]
+            )
+            funnel["validated_product_demand_revenue_usd"] = (
+                f"{route_validated_demand_revenue[route]:.2f}"
             )
             if route_independent_paid_attempts[route]:
                 funnel["independent_paid_fulfillment_rate_percent"] = round(
@@ -3460,6 +3530,15 @@ class EvidenceService:
             if independent_paid_attempts
             else None
         )
+        validated_demand_buyers = len(validated_demand_payer_days)
+        validated_demand_repeat_buyers = sum(
+            1 for days in validated_demand_payer_days.values() if len(days) >= 2
+        )
+        validated_demand_top_buyer_share = (
+            max(validated_demand_payer_calls.values()) / validated_demand_calls
+            if validated_demand_calls
+            else None
+        )
         status["conversion_experiment"] = {
             "cohort_start_utc": cohort_start_utc,
             "independent_buyer_clusters": independent_buyers,
@@ -3470,6 +3549,22 @@ class EvidenceService:
             "independent_gross_margin_usd": (
                 f"{independent_revenue - independent_direct_cost:.2f}"
             ),
+            "paid_catalog_sample_calls": catalog_sample_calls,
+            "paid_catalog_sample_buyer_clusters": len(catalog_sample_payers),
+            "paid_catalog_sample_revenue_usd": f"{catalog_sample_revenue:.2f}",
+            "paid_catalog_sample_direct_cost_usd": (
+                f"{catalog_sample_direct_cost:.2f}"
+            ),
+            "validated_product_demand_calls": validated_demand_calls,
+            "validated_product_demand_buyer_clusters": validated_demand_buyers,
+            "validated_product_demand_repeat_buyers": (validated_demand_repeat_buyers),
+            "validated_product_demand_revenue_usd": (f"{validated_demand_revenue:.2f}"),
+            "validated_product_demand_direct_cost_usd": (
+                f"{validated_demand_direct_cost:.2f}"
+            ),
+            "validated_product_demand_gross_margin_usd": (
+                f"{validated_demand_revenue - validated_demand_direct_cost:.2f}"
+            ),
             "owner_direct_cost_usd": f"{owner_direct_cost:.2f}",
             "max_independent_buyer_call_share": (
                 round(top_buyer_share, 4) if top_buyer_share is not None else None
@@ -3479,16 +3574,24 @@ class EvidenceService:
                 if paid_fulfillment_rate is not None
                 else None
             ),
+            "validated_product_demand_max_buyer_call_share": (
+                round(validated_demand_top_buyer_share, 4)
+                if validated_demand_top_buyer_share is not None
+                else None
+            ),
             "gates": {
-                "five_independent_buyers": independent_buyers >= 5,
-                "fifty_independent_fulfilled_calls": independent_fulfilled >= 50,
-                "two_repeat_buyers_across_utc_days": repeat_buyers >= 2,
+                "five_independent_buyers": validated_demand_buyers >= 5,
+                "fifty_independent_fulfilled_calls": validated_demand_calls >= 50,
+                "two_repeat_buyers_across_utc_days": (
+                    validated_demand_repeat_buyers >= 2
+                ),
                 "paid_fulfillment_at_least_99_percent": bool(
                     paid_fulfillment_rate is not None
                     and paid_fulfillment_rate >= Decimal("0.99")
                 ),
                 "no_buyer_above_50_percent_of_calls": bool(
-                    top_buyer_share is not None and top_buyer_share <= 0.50
+                    validated_demand_top_buyer_share is not None
+                    and validated_demand_top_buyer_share <= 0.50
                 ),
             },
             "routes": list(funnels.values()),
@@ -3496,6 +3599,7 @@ class EvidenceService:
                 "Owner and testnet payments are excluded from every conversion gate.",
                 "Unpaid 402 challenges include monitors and crawlers, so they are not treated as buyers or a conversion denominator.",
                 "A repeat buyer must fulfill calls on at least two distinct UTC dates.",
+                "Commercial scale gates count only non-example paid requests; published catalog samples remain cash revenue but are excluded from product-demand validation.",
             ],
         }
         return status
