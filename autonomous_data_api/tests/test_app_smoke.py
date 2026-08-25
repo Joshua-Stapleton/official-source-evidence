@@ -473,7 +473,7 @@ def test_machine_discovery_and_crawler_surfaces(client):
             },
             "payment-preflight",
             "10000",
-            "Official Source Evidence",
+            "Agent Payment Safety Preflight",
         ),
         (
             "/v1/sec/filing-change-signal",
@@ -508,7 +508,7 @@ def test_machine_discovery_and_crawler_surfaces(client):
             },
             "exact-match",
             "50000",
-            "Official Source Evidence",
+            "Agent Payment Safety Evidence",
         ),
     ],
 )

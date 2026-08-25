@@ -802,20 +802,19 @@ x402_routes: dict[str, RouteConfig] = {
         ],
         mime_type="application/json",
         description=(
-            "Before an autonomous agent sends funds, check whether the exact EVM "
-            "destination address appears in current official OFAC SDN or "
-            "Consolidated data. Returns a compact stop/no-exact-match decision, "
-            "freshness, and the premium evidence path; no clearance or legal advice."
+            "Use immediately before an autonomous agent pays an EVM wallet. Checks "
+            "the destination for an exact identifier match in current official "
+            "OFAC SDN and Consolidated data, then returns STOP or NO_EXACT_MATCH, "
+            "freshness, and a signed-evidence upgrade path. Exact-match only; not "
+            "a complete wallet-risk score, sanctions clearance, or legal advice."
         ),
-        service_name="Official Source Evidence",
+        service_name="Agent Payment Safety Preflight",
         tags=[
-            "ofac",
-            "sanctions",
-            "wallet-screening",
             "payment-preflight",
-            "transaction-gate",
-            "crypto-address",
-            "decision",
+            "transaction-safety",
+            "wallet-risk",
+            "counterparty-check",
+            "ofac",
         ],
         icon_url=SERVICE_ICON_URL,
         extensions=get_discovery_extension(
@@ -1087,21 +1086,20 @@ x402_routes: dict[str, RouteConfig] = {
         ],
         mime_type="application/json",
         description=(
-            "Run an exact-match OFAC SDN and Consolidated identifier lookup for "
-            "crypto wallets, OFAC UIDs, or exact names. Returns versioned U.S. "
-            "Treasury source hashes and a signed evidence receipt; no fuzzy "
-            "screening or sanctions clearance."
+            "Use when an autonomous agent needs signed, auditable payee evidence "
+            "before or after a payment. Runs an exact-match OFAC SDN and "
+            "Consolidated lookup for crypto wallets, UIDs, or exact names and "
+            "returns current U.S. Treasury source hashes and a signed receipt. "
+            "Exact match only; no fuzzy screening, ownership/control analysis, or "
+            "sanctions clearance."
         ),
-        service_name="Official Source Evidence",
+        service_name="Agent Payment Safety Evidence",
         tags=[
             "ofac",
             "sanctions",
-            "sdn",
-            "wallet-screening",
+            "wallet-risk",
+            "counterparty-check",
             "exact-match",
-            "crypto-address",
-            "compliance-data",
-            "source-proof",
         ],
         icon_url=SERVICE_ICON_URL,
         extensions=get_discovery_extension(

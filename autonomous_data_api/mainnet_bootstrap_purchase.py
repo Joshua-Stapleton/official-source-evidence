@@ -99,6 +99,15 @@ PRODUCTS = {
             "domain": "stripe.com",
         },
     },
+    "python_run": {
+        "endpoint": "https://evidence.regulavita.com/v1/compute/python-run",
+        "amount_atomic": "30000",
+        "arm_value": "0.03",
+        "payload": {
+            "code": "import json; print(json.dumps({'answer': sum(range(11))}))",
+            "timeout_seconds": 10,
+        },
+    },
     "ofac": {
         "endpoint": (
             "https://evidence.regulavita.com/v1/ofac/exact-identifier-evidence"
@@ -270,6 +279,7 @@ async def main() -> None:
                 "product_status": result.get("status"),
                 "decision": result.get("decision"),
                 "profile": result.get("profile"),
+                "execution": result.get("execution"),
                 "source_record_count": len(result.get("source_records", [])),
                 "supplier_execution": result.get("supplier_execution"),
                 "monitor_id": result.get("monitor_id"),
