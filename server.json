@@ -1,6 +1,6 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.joshua-stapleton/official-source-evidence",
+  "name": "io.github.Joshua-Stapleton/official-source-evidence",
   "title": "Official Source Evidence",
   "description": "Accountless public-source, SEC Form D and OFAC tools with x402 USDC payment on Base.",
   "version": "1.0.0",
