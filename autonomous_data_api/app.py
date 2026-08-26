@@ -62,6 +62,7 @@ from autonomous_data_api.evidence import (
     WebMonitorCreateRequest,
 )
 from autonomous_data_api.marketplace import MarketplaceError, The402Provider
+from autonomous_data_api.mcp_service import EvidenceMCPService, MCPProduct
 from autonomous_data_api.monitors import (
     MonitorError,
     WebMonitorService,
@@ -260,6 +261,52 @@ PROCUREMENT_READY = (
     PROCUREMENT_ENABLED and procurement_broker_service.configured and X402_REVENUE_READY
 )
 
+evidence_mcp_service = EvidenceMCPService(
+    db_path=evidence_service.db_path,
+    public_base_url=PUBLIC_BASE_URL,
+    status_provider=lambda: health(),
+    products={
+        "source_snapshot": MCPProduct(
+            key="source_snapshot",
+            path="/v1/web/source-snapshot",
+            price=X402_SOURCE_SNAPSHOT_PRICE,
+            description=(
+                "Fetch one public HTTPS source as normalized text with a content "
+                "hash, optional literal excerpts, and a signed receipt."
+            ),
+            example=SOURCE_SNAPSHOT_PROBE_PAYLOAD,
+        ),
+        "form_d_funding_leads": MCPProduct(
+            key="form_d_funding_leads",
+            path="/v1/gtm/form-d-funding-leads",
+            price=X402_FORM_D_PRICE,
+            description=(
+                "Find recent SEC Form D private-offering signals with official "
+                "filing links, related people, and cursor pagination."
+            ),
+            example=FORM_D_PROBE_PAYLOAD,
+        ),
+        "payment_preflight": MCPProduct(
+            key="payment_preflight",
+            path="/v1/ofac/payment-preflight",
+            price=X402_OFAC_PREFLIGHT_PRICE,
+            description=(
+                "Check whether an exact EVM destination appears in current official "
+                "OFAC data before payment. This is not sanctions clearance."
+            ),
+            example=OFAC_PREFLIGHT_PROBE_PAYLOAD,
+        ),
+    },
+)
+evidence_mcp_app = evidence_mcp_service.server.streamable_http_app(
+    streamable_http_path="/",
+    json_response=True,
+    stateless_http=True,
+    max_request_body_size=65_536,
+    transport_security=evidence_mcp_service.transport_security(),
+    host="0.0.0.0",
+)
+
 
 async def refresh_ofac_sources() -> None:
     while True:
@@ -293,17 +340,18 @@ async def lifespan(_: FastAPI):
         refresh_task = asyncio.create_task(refresh_ofac_sources())
     if os.getenv("AUTONOMOUS_SOURCE_WATCH_ENABLED", "1") == "1":
         monitor_task = asyncio.create_task(run_source_watch_checks())
-    try:
-        yield
-    finally:
-        tasks = [task for task in (refresh_task, monitor_task) if task]
-        for task in tasks:
-            task.cancel()
-        for task in tasks:
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+    async with evidence_mcp_service.server.session_manager.run():
+        try:
+            yield
+        finally:
+            tasks = [task for task in (refresh_task, monitor_task) if task]
+            for task in tasks:
+                task.cancel()
+            for task in tasks:
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
 
 app = FastAPI(
@@ -2329,6 +2377,11 @@ def health() -> dict[str, Any]:
         },
         "source_watch": monitor_service.public_stats(),
         "marketplace": {"the402": the402_provider.public_status()},
+        "mcp": {
+            "endpoint": f"{PUBLIC_BASE_URL.rstrip('/')}/mcp/",
+            "transport": "streamable-http",
+            "stats": evidence_mcp_service.store.public_stats(),
+        },
     }
 
 
@@ -2411,6 +2464,12 @@ def llms_txt() -> PlainTextResponse:
         f"""# Agent Procurement and Evidence API
 
 Brokered machine-service procurement, long-running monitoring jobs, and pay-per-call official-source evidence for autonomous agents. No account or API key.
+
+## Remote MCP
+- Streamable HTTP: {base_url}/mcp/
+- Registry manifest: {base_url}/server.json
+- Free tools expose live service status, quotes, and structured capability requests.
+- Paid MCP workflow: request a live x402 challenge, sign it with a wallet outside the service, then submit the signature with the same arguments. Never send a private key or seed phrase.
 
 ## Paid endpoints
 - POST {base_url}/v1/compute/python-run - $0.03 USDC. Run bounded Python 3.11 code in an ephemeral isolated sandbox with one payment. Returns stdout, stderr, return code, three-stage supplier settlement provenance, and a signed receipt.
@@ -2499,6 +2558,12 @@ def agent_manifest() -> dict[str, Any]:
         },
         "openapi_url": f"{base_url}/openapi.json",
         "llms_url": f"{base_url}/llms.txt",
+        "mcp": {
+            "transport": "streamable-http",
+            "url": f"{base_url}/mcp/",
+            "authentication": "none",
+            "payment": "x402-v2 within paid tool workflow",
+        },
         "sample_endpoints": [
             f"{base_url}/v1/compute/python-run/sample",
             f"{base_url}/v1/procure/company-profile/sample",
@@ -2538,6 +2603,11 @@ def agent_manifest() -> dict[str, Any]:
             "No sanctions clearance, transaction authorization, or fuzzy screening.",
         ],
     }
+
+
+@app.get("/server.json", include_in_schema=False)
+def mcp_registry_manifest() -> FileResponse:
+    return FileResponse(Path(__file__).resolve().parents[1] / "server.json")
 
 
 @app.get("/v1/web/source-snapshot/sample")
@@ -3303,7 +3373,9 @@ def replay_evidence_result(
 
 @app.get("/v1/experiments/status")
 def evidence_experiment_status() -> dict[str, Any]:
-    return evidence_service.experiment_status(CONVERSION_EXPERIMENT_START_UTC or None)
+    status = evidence_service.experiment_status(CONVERSION_EXPERIMENT_START_UTC or None)
+    status["mcp"] = evidence_mcp_service.store.public_stats()
+    return status
 
 
 @app.get("/v1/summary")
@@ -3326,6 +3398,10 @@ def summary() -> dict[str, Any]:
             CONVERSION_EXPERIMENT_START_UTC or None
         ),
         "source_watch": monitor_service.public_stats(),
+        "mcp": {
+            "endpoint": f"{PUBLIC_BASE_URL.rstrip('/')}/mcp/",
+            "stats": evidence_mcp_service.store.public_stats(),
+        },
     }
 
 
@@ -3576,3 +3652,4 @@ def custom_openapi() -> dict[str, Any]:
 
 
 app.openapi = custom_openapi
+app.mount("/mcp", evidence_mcp_app, name="official-source-evidence-mcp")

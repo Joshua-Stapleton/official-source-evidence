@@ -41,7 +41,7 @@ from autonomous_data_api.evidence import PreparedResult, SourceStaleError
 from autonomous_data_api.procurement import PythonRunRequest
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def client():
     with TestClient(app) as test_client:
         yield test_client
@@ -772,3 +772,70 @@ def test_cdp_facilitator_auth_signs_each_endpoint_for_mainnet():
             authorization.removeprefix("Bearer "), options={"verify_signature": False}
         )
         assert claims["uris"] == [expected_uri]
+
+
+def test_remote_mcp_lists_free_and_paid_workflow_tools(client):
+    headers = {
+        "Accept": "application/json, text/event-stream",
+        "Content-Type": "application/json",
+        "MCP-Protocol-Version": "2025-11-25",
+    }
+    initialized = client.post(
+        "/mcp/",
+        headers=headers,
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "pytest", "version": "1.0"},
+            },
+        },
+    )
+    assert initialized.status_code == 200
+    assert initialized.json()["result"]["serverInfo"]["name"] == (
+        "official-source-evidence"
+    )
+
+    listed = client.post(
+        "/mcp/",
+        headers=headers,
+        json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+    )
+    assert listed.status_code == 200
+    names = {tool["name"] for tool in listed.json()["result"]["tools"]}
+    assert names == {
+        "get_service_status",
+        "get_quote",
+        "request_capability",
+        "get_source_snapshot_payment",
+        "get_form_d_funding_leads_payment",
+        "get_payment_preflight_payment",
+        "submit_x402_payment",
+    }
+
+    quoted = client.post(
+        "/mcp/",
+        headers=headers,
+        json={
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "get_quote",
+                "arguments": {"product": "payment_preflight"},
+            },
+        },
+    )
+    assert quoted.status_code == 200
+    structured = quoted.json()["result"]["structuredContent"]
+    assert structured["price"] == "$0.01"
+    assert structured["account_required"] is False
+
+
+def test_mcp_registry_manifest_is_public(client):
+    response = client.get("/server.json")
+    assert response.status_code == 200
+    assert response.json()["remotes"][0]["url"].endswith("/mcp/")

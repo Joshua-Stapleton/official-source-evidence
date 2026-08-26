@@ -1,0 +1,41 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.joshua-stapleton/official-source-evidence",
+  "title": "Official Source Evidence",
+  "description": "Accountless public-source, SEC Form D and OFAC tools with x402 USDC payment on Base.",
+  "version": "1.0.0",
+  "websiteUrl": "https://evidence.regulavita.com/",
+  "repository": {
+    "url": "https://github.com/Joshua-Stapleton/flyio",
+    "source": "github"
+  },
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://evidence.regulavita.com/mcp/",
+      "headers": [
+        {
+          "name": "Accept",
+          "description": "Request JSON responses from the stateless Remote MCP server.",
+          "isRequired": false,
+          "isSecret": false,
+          "default": "application/json"
+        }
+      ]
+    }
+  ],
+  "_meta": {
+    "io.modelcontextprotocol.registry/publisher-provided": {
+      "category": ["agent-commerce", "data", "compliance", "customer-discovery"],
+      "keywords": ["x402-v2", "USDC", "Base", "public-source", "SEC-Form-D", "OFAC"],
+      "access": "Free discovery and capability-request tools; accountless x402 paid fulfillment.",
+      "paymentSafety": "Live quote before payment, wallet-generated signatures only, and request-id replay after fulfillment.",
+      "documentation": {
+        "website": "https://evidence.regulavita.com/",
+        "openapi": "https://evidence.regulavita.com/openapi.json",
+        "llms": "https://evidence.regulavita.com/llms.txt",
+        "agentManifest": "https://evidence.regulavita.com/.well-known/agent-service.json"
+      }
+    }
+  }
+}

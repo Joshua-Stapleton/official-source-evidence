@@ -9,6 +9,7 @@ COPY autonomous_data_api/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY autonomous_data_api ./autonomous_data_api
+COPY server.json ./server.json
 
 EXPOSE 8765
 
