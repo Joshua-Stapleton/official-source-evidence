@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
+import os
+import secrets
 import sqlite3
 import threading
 import uuid
 from collections.abc import Callable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -15,6 +19,70 @@ from urllib.parse import urlparse
 import httpx
 from mcp.server import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
+
+MCP_REQUEST_CONTEXT: ContextVar[dict[str, str] | None] = ContextVar(
+    "mcp_request_context", default=None
+)
+
+
+def user_agent_family(user_agent: str | None) -> str:
+    value = (user_agent or "").casefold()
+    if not value:
+        return "unknown"
+    if "coinbase" in value or "coinbase-cdp" in value:
+        return "coinbase-cdp"
+    if "x402-list" in value:
+        return "x402-list"
+    if "x402scan" in value:
+        return "x402scan"
+    if "httpx" in value:
+        return "python-httpx"
+    if "python-requests" in value:
+        return "python-requests"
+    if "axios" in value:
+        return "node-axios"
+    if "node" in value or "undici" in value:
+        return "node-http"
+    if "curl" in value:
+        return "curl"
+    if "mozilla/" in value:
+        return "browser"
+    return "other"
+
+
+class MCPRequestContextMiddleware:
+    """Attach privacy-preserving client context to MCP tool telemetry."""
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = {
+            key.decode("latin-1").casefold(): value.decode("latin-1")
+            for key, value in scope.get("headers", [])
+        }
+        client = headers.get("fly-client-ip", "").strip()
+        if not client:
+            forwarded = headers.get("x-forwarded-for", "")
+            client = forwarded.split(",", 1)[0].strip()
+        if not client:
+            peer = scope.get("client")
+            client = str(peer[0]) if peer else "unknown"
+        user_agent = headers.get("user-agent", "")
+        token = MCP_REQUEST_CONTEXT.set(
+            {
+                "client_identifier": client,
+                "user_agent": user_agent,
+                "user_agent_family": user_agent_family(user_agent),
+            }
+        )
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            MCP_REQUEST_CONTEXT.reset(token)
 
 
 def utc_now() -> str:
@@ -41,6 +109,7 @@ class MCPDemandStore:
     def __init__(self, db_path: Path | str) -> None:
         self.db_path = Path(db_path)
         self.lock = threading.Lock()
+        self.analytics_hmac_key = self._load_analytics_key()
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
@@ -73,7 +142,12 @@ class MCPDemandStore:
                     tool_name TEXT NOT NULL,
                     event_type TEXT NOT NULL,
                     product TEXT,
-                    request_hash TEXT
+                    request_hash TEXT,
+                    http_status INTEGER,
+                    failure_code TEXT,
+                    client_hmac TEXT,
+                    user_agent_hmac TEXT,
+                    user_agent_family TEXT
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_mcp_events_created_at
@@ -82,6 +156,44 @@ class MCPDemandStore:
                     ON mcp_events(event_type, product);
                 """
             )
+            existing_columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(mcp_events)"
+                ).fetchall()
+            }
+            telemetry_columns = {
+                "http_status": "INTEGER",
+                "failure_code": "TEXT",
+                "client_hmac": "TEXT",
+                "user_agent_hmac": "TEXT",
+                "user_agent_family": "TEXT",
+            }
+            for column, column_type in telemetry_columns.items():
+                if column not in existing_columns:
+                    connection.execute(
+                        f"ALTER TABLE mcp_events ADD COLUMN {column} {column_type}"
+                    )
+
+    def _load_analytics_key(self) -> bytes:
+        configured = os.getenv("AUTONOMOUS_ANALYTICS_HMAC_KEY", "").encode("utf-8")
+        if configured:
+            return hashlib.sha256(configured).digest()
+        key_path = self.db_path.parent / "analytics_hmac.key"
+        if key_path.exists():
+            return key_path.read_bytes()
+        key = secrets.token_bytes(32)
+        key_path.parent.mkdir(parents=True, exist_ok=True)
+        key_path.write_bytes(key)
+        key_path.chmod(0o600)
+        return key
+
+    def _analytics_hmac(self, value: str | None) -> str | None:
+        if not value:
+            return None
+        return hmac.new(
+            self.analytics_hmac_key, value.encode("utf-8"), hashlib.sha256
+        ).hexdigest()
 
     def record_event(
         self,
@@ -90,15 +202,31 @@ class MCPDemandStore:
         *,
         product: str | None = None,
         request_hash: str | None = None,
+        http_status: int | None = None,
+        failure_code: str | None = None,
     ) -> None:
+        request_context = MCP_REQUEST_CONTEXT.get() or {}
         with self.lock, self._connect() as connection:
             connection.execute(
                 """
                 INSERT INTO mcp_events (
-                    created_at, tool_name, event_type, product, request_hash
-                ) VALUES (?, ?, ?, ?, ?)
+                    created_at, tool_name, event_type, product, request_hash,
+                    http_status, failure_code, client_hmac, user_agent_hmac,
+                    user_agent_family
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (utc_now(), tool_name, event_type, product, request_hash),
+                (
+                    utc_now(),
+                    tool_name,
+                    event_type,
+                    product,
+                    request_hash,
+                    http_status,
+                    failure_code,
+                    self._analytics_hmac(request_context.get("client_identifier")),
+                    self._analytics_hmac(request_context.get("user_agent")),
+                    request_context.get("user_agent_family"),
+                ),
             )
 
     def submit_capability(self, payload: dict[str, Any]) -> tuple[str, bool]:
@@ -169,8 +297,25 @@ class MCPDemandStore:
             capability_count = connection.execute(
                 "SELECT COUNT(*) AS count FROM mcp_capability_requests"
             ).fetchone()
+            failures = connection.execute(
+                """
+                SELECT product, http_status, failure_code, COUNT(*) AS count
+                FROM mcp_events
+                WHERE event_type IN ('PREPARE_FAILED', 'PAID_FAILED')
+                GROUP BY product, http_status, failure_code
+                ORDER BY count DESC, product
+                """
+            ).fetchall()
+            clients = connection.execute(
+                """
+                SELECT COUNT(DISTINCT client_hmac) AS count
+                FROM mcp_events
+                WHERE client_hmac IS NOT NULL
+                """
+            ).fetchone()
         return {
             "capability_requests": int(capability_count["count"]),
+            "attributed_client_clusters": int(clients["count"]),
             "events": [
                 {
                     "event_type": row["event_type"],
@@ -178,6 +323,15 @@ class MCPDemandStore:
                     "count": int(row["count"]),
                 }
                 for row in rows
+            ],
+            "failures": [
+                {
+                    "product": row["product"],
+                    "http_status": row["http_status"],
+                    "failure_code": row["failure_code"],
+                    "count": int(row["count"]),
+                }
+                for row in failures
             ],
         }
 
@@ -204,12 +358,14 @@ class EvidenceMCPService:
             ),
             instructions=(
                 "Call get_service_status and get_quote before spending. For a paid "
-                "job, call the matching get_*_payment tool, have an x402 wallet sign "
-                "the returned PAYMENT-REQUIRED value, then call submit_x402_payment. "
+                "job, call get_example_payment for a guaranteed valid example or the "
+                "matching get_*_payment tool for custom input, have an x402 wallet "
+                "sign the returned PAYMENT-REQUIRED value, then call "
+                "submit_x402_payment. "
                 "Never put a private key or seed phrase in any tool argument."
             ),
             website_url=self.public_base_url,
-            version="1.0.0",
+            version="1.1.0",
         )
         self._register_tools()
 
@@ -260,23 +416,48 @@ class EvidenceMCPService:
         except (ValueError, json.JSONDecodeError):
             return {"detail": response.text[:1000]}
 
+    @staticmethod
+    def _failure_code(payload: Any, status_code: int) -> str:
+        if isinstance(payload, dict):
+            error = payload.get("error")
+            if isinstance(error, dict) and isinstance(error.get("code"), str):
+                return error["code"][:128]
+            detail = payload.get("detail")
+            if isinstance(detail, dict) and isinstance(detail.get("code"), str):
+                return detail["code"][:128]
+        return f"HTTP_{status_code}"
+
     async def _prepare_payment(
         self, product_name: str, arguments: dict[str, Any]
     ) -> dict[str, Any]:
         product = self._product(product_name)
         request_hash = canonical_hash(arguments)
         response = await self._post_paid_route(product, arguments)
+        response_payload = self._response_json(response)
         self.store.record_event(
             f"get_{product.key}_payment",
             "PAYMENT_CHALLENGE" if response.status_code == 402 else "PREPARE_FAILED",
             product=product.key,
             request_hash=request_hash,
+            http_status=response.status_code,
+            failure_code=(
+                None
+                if response.status_code == 402
+                else self._failure_code(response_payload, response.status_code)
+            ),
         )
         if response.status_code != 402:
             return {
                 "status": "failed",
                 "http_status": response.status_code,
-                "error": self._response_json(response),
+                "failure_code": self._failure_code(
+                    response_payload, response.status_code
+                ),
+                "error": response_payload,
+                "recovery": (
+                    "Call get_quote for a valid custom-input example or call "
+                    "get_example_payment for a guaranteed valid challenge."
+                ),
             }
         return {
             "status": "payment_required",
@@ -348,6 +529,19 @@ class EvidenceMCPService:
                     "payment overrides cached price metadata."
                 ),
             }
+
+        @server.tool(
+            description=(
+                "Create a live x402 challenge using this service's known-valid "
+                "published example for one product. This never moves funds. The "
+                "returned arguments can be passed unchanged to submit_x402_payment."
+            )
+        )
+        async def get_example_payment(product: str) -> dict[str, Any]:
+            resolved = self._product(product)
+            arguments = dict(resolved.example)
+            result = await self._prepare_payment(resolved.key, arguments)
+            return {**result, "example": True, "arguments": arguments}
 
         @server.tool(
             description=(
@@ -524,6 +718,7 @@ class EvidenceMCPService:
             response = await self._post_paid_route(
                 resolved, arguments, payment_signature=payment_signature
             )
+            response_payload = self._response_json(response)
             event_type = (
                 "PAID_FULFILLED" if response.status_code < 400 else "PAID_FAILED"
             )
@@ -532,6 +727,12 @@ class EvidenceMCPService:
                 event_type,
                 product=resolved.key,
                 request_hash=canonical_hash(arguments),
+                http_status=response.status_code,
+                failure_code=(
+                    None
+                    if response.status_code < 400
+                    else self._failure_code(response_payload, response.status_code)
+                ),
             )
             return {
                 "status": "fulfilled" if response.status_code < 400 else "failed",
@@ -546,7 +747,5 @@ class EvidenceMCPService:
                 "payment_failure_reason": response.headers.get(
                     "x-evidence-payment-failure-reason"
                 ),
-                "result"
-                if response.status_code < 400
-                else "error": self._response_json(response),
+                "result" if response.status_code < 400 else "error": response_payload,
             }

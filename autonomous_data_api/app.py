@@ -62,7 +62,11 @@ from autonomous_data_api.evidence import (
     WebMonitorCreateRequest,
 )
 from autonomous_data_api.marketplace import MarketplaceError, The402Provider
-from autonomous_data_api.mcp_service import EvidenceMCPService, MCPProduct
+from autonomous_data_api.mcp_service import (
+    EvidenceMCPService,
+    MCPProduct,
+    MCPRequestContextMiddleware,
+)
 from autonomous_data_api.monitors import (
     MonitorError,
     WebMonitorService,
@@ -298,13 +302,15 @@ evidence_mcp_service = EvidenceMCPService(
         ),
     },
 )
-evidence_mcp_app = evidence_mcp_service.server.streamable_http_app(
-    streamable_http_path="/",
-    json_response=True,
-    stateless_http=True,
-    max_request_body_size=65_536,
-    transport_security=evidence_mcp_service.transport_security(),
-    host="0.0.0.0",
+evidence_mcp_app = MCPRequestContextMiddleware(
+    evidence_mcp_service.server.streamable_http_app(
+        streamable_http_path="/",
+        json_response=True,
+        stateless_http=True,
+        max_request_body_size=65_536,
+        transport_security=evidence_mcp_service.transport_security(),
+        host="0.0.0.0",
+    )
 )
 
 
@@ -2432,6 +2438,7 @@ def sitemap() -> Response:
         "/",
         "/docs",
         "/openapi.json",
+        "/.well-known/x402",
         "/v1/procure/company-profile/sample",
         "/v1/compute/python-run/sample",
         "/v1/web/source-snapshot/sample",
@@ -2485,6 +2492,7 @@ Brokered machine-service procurement, long-running monitoring jobs, and pay-per-
 
 ## Machine-readable contracts
 - OpenAPI: {base_url}/openapi.json
+- x402 compatibility manifest: {base_url}/.well-known/x402
 - Agent manifest: {base_url}/.well-known/agent-service.json
 - Interactive docs: {base_url}/docs
 - Isolated Python Runner sample: {base_url}/v1/compute/python-run/sample
@@ -2558,6 +2566,7 @@ def agent_manifest() -> dict[str, Any]:
         },
         "openapi_url": f"{base_url}/openapi.json",
         "llms_url": f"{base_url}/llms.txt",
+        "x402_manifest_url": f"{base_url}/.well-known/x402",
         "mcp": {
             "transport": "streamable-http",
             "url": f"{base_url}/mcp/",
@@ -2602,6 +2611,44 @@ def agent_manifest() -> dict[str, Any]:
             "No investment advice or materiality opinion.",
             "No sanctions clearance, transaction authorization, or fuzzy screening.",
         ],
+    }
+
+
+@app.get("/.well-known/x402", include_in_schema=False)
+def x402_compatibility_manifest() -> dict[str, Any]:
+    """Compatibility discovery surface; live 402 responses remain authoritative."""
+    base_url = PUBLIC_BASE_URL.rstrip("/")
+    payment = agent_manifest()["payment"]
+    return {
+        "x402Version": 2,
+        "name": "Agent Procurement and Evidence API",
+        "description": (
+            "Accountless x402 v2 USDC endpoints and MCP tools for autonomous agents."
+        ),
+        "network": X402_NETWORK,
+        "currency": "USDC",
+        "payTo": X402_PAY_TO,
+        "resources": [
+            {
+                "method": "POST",
+                "url": f"{base_url}{path}",
+                "price": price,
+            }
+            for path, price in payment["prices"].items()
+        ],
+        "mcp": {
+            "transport": "streamable-http",
+            "url": f"{base_url}/mcp/",
+            "registry_manifest": f"{base_url}/server.json",
+            "example_payment_tool": "get_example_payment",
+        },
+        "official_bazaar_discovery": (
+            "https://api.cdp.coinbase.com/platform/v2/x402/discovery/resources"
+        ),
+        "authoritative_terms": (
+            "The live PAYMENT-REQUIRED response immediately before payment overrides "
+            "cached discovery metadata."
+        ),
     }
 
 

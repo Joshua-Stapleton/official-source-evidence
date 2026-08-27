@@ -15,6 +15,7 @@ os.environ.setdefault(
 )
 os.environ.setdefault("AUTONOMOUS_ANALYTICS_HMAC_KEY", "test-analytics-key")
 
+import httpx
 import jwt
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -32,6 +33,7 @@ from autonomous_data_api.app import (
     EvidencePrecomputeMiddleware,
     MainnetRevenueCapMiddleware,
     app,
+    evidence_mcp_service,
     evidence_service,
     load_cdp_api_key_secret,
     payment_failure_diagnostics,
@@ -357,6 +359,7 @@ def test_agent_manifest_promotes_only_verdict_endpoints(client):
     assert manifest.status_code == 200
     payload = manifest.json()
     assert payload["openapi_url"].endswith("/openapi.json")
+    assert payload["x402_manifest_url"].endswith("/.well-known/x402")
     assert payload["payment"]["protocol"] == "x402-v2"
     assert payload["agent_paid_endpoints"] == [
         "http://localhost:8765/v1/web/source-snapshot",
@@ -432,6 +435,21 @@ def test_machine_discovery_and_crawler_surfaces(client):
     assert icon.status_code == 200
     assert icon.headers["content-type"].startswith("image/png")
     assert len(icon.content) > 1_000
+
+    x402_manifest = client.get("/.well-known/x402")
+    assert x402_manifest.status_code == 200
+    x402_payload = x402_manifest.json()
+    assert x402_payload["x402Version"] == 2
+    assert (
+        x402_payload["network"]
+        == client.get("/.well-known/agent-service.json").json()["payment"]["network"]
+    )
+    assert x402_payload["mcp"]["example_payment_tool"] == "get_example_payment"
+    assert any(
+        resource["url"].endswith("/v1/ofac/payment-preflight")
+        and resource["price"] == "$0.01"
+        for resource in x402_payload["resources"]
+    )
 
 
 @pytest.mark.parametrize(
@@ -809,6 +827,7 @@ def test_remote_mcp_lists_free_and_paid_workflow_tools(client):
     assert names == {
         "get_service_status",
         "get_quote",
+        "get_example_payment",
         "request_capability",
         "get_source_snapshot_payment",
         "get_form_d_funding_leads_payment",
@@ -833,6 +852,53 @@ def test_remote_mcp_lists_free_and_paid_workflow_tools(client):
     structured = quoted.json()["result"]["structuredContent"]
     assert structured["price"] == "$0.01"
     assert structured["account_required"] is False
+
+    example_tool = next(
+        tool
+        for tool in listed.json()["result"]["tools"]
+        if tool["name"] == "get_example_payment"
+    )
+    assert "known-valid" in example_tool["description"]
+
+
+def test_remote_mcp_example_payment_reaches_challenge(client, monkeypatch):
+    async def challenge(*_args, **_kwargs):
+        return httpx.Response(
+            402,
+            headers={
+                "payment-required": "fixture-payment-required",
+                "x-evidence-request-id": "fixture-request-id",
+                "x-evidence-request-hash": "fixture-request-hash",
+            },
+            json={"error": "payment required"},
+        )
+
+    monkeypatch.setattr(evidence_mcp_service, "_post_paid_route", challenge)
+    headers = {
+        "Accept": "application/json, text/event-stream",
+        "Content-Type": "application/json",
+        "MCP-Protocol-Version": "2025-11-25",
+        "User-Agent": "pytest-mcp-agent/1.0",
+    }
+    response = client.post(
+        "/mcp/",
+        headers=headers,
+        json={
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "get_example_payment",
+                "arguments": {"product": "payment_preflight"},
+            },
+        },
+    )
+    assert response.status_code == 200
+    structured = response.json()["result"]["structuredContent"]
+    assert structured["status"] == "payment_required"
+    assert structured["payment_required"] == "fixture-payment-required"
+    assert structured["example"] is True
+    assert structured["arguments"]["network"] == "eip155:8453"
 
 
 def test_mcp_registry_manifest_is_public(client):

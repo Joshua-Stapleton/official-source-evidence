@@ -7,6 +7,8 @@ account, API key, or sales call.
 **Live service:** [evidence.regulavita.com](https://evidence.regulavita.com/)
 | [OpenAPI](https://evidence.regulavita.com/openapi.json)
 | [Agent manifest](https://evidence.regulavita.com/.well-known/agent-service.json)
+| [Remote MCP](https://evidence.regulavita.com/server.json)
+| [x402 compatibility](https://evidence.regulavita.com/.well-known/x402)
 | [Coinbase Bazaar listing](https://api.cdp.coinbase.com/platform/v2/x402/discovery/merchant?payTo=0x9500075649a70411c81f99c4314f6cff55d12579&limit=100)
 
 The Source Watch demand hypothesis, attribution rules, and stop/scale gates are
@@ -57,6 +59,13 @@ HTTP 402 challenge without charging. Non-empty malformed or schema-invalid
 requests are still rejected before payment.
 
 ## Discover and Inspect
+
+The stateless Remote MCP at `https://evidence.regulavita.com/mcp/` exposes free
+status, quotes, and capability requests. `get_example_payment` creates a live
+x402 challenge from a known-valid published example without moving funds; this
+lets generic catalog agents reach the payment decision without inventing test
+inputs. Custom-input tools remain strict and return a machine-readable recovery
+path when validation fails.
 
 Search the Coinbase Bazaar from an Agentic Wallet CLI:
 
