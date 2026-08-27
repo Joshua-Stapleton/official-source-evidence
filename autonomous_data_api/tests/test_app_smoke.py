@@ -899,6 +899,12 @@ def test_remote_mcp_example_payment_reaches_challenge(client, monkeypatch):
     assert structured["payment_required"] == "fixture-payment-required"
     assert structured["example"] is True
     assert structured["arguments"]["network"] == "eip155:8453"
+    with evidence_mcp_service.store._connect() as connection:
+        event = connection.execute(
+            "SELECT tool_name, http_status FROM mcp_events ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    assert event["tool_name"] == "get_example_payment"
+    assert event["http_status"] == 402
 
 
 def test_mcp_registry_manifest_is_public(client):

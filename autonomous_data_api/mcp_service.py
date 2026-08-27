@@ -29,6 +29,8 @@ def user_agent_family(user_agent: str | None) -> str:
     value = (user_agent or "").casefold()
     if not value:
         return "unknown"
+    if "regulavita-owner-smoke" in value:
+        return "owner-smoke"
     if "coinbase" in value or "coinbase-cdp" in value:
         return "coinbase-cdp"
     if "x402-list" in value:
@@ -428,14 +430,18 @@ class EvidenceMCPService:
         return f"HTTP_{status_code}"
 
     async def _prepare_payment(
-        self, product_name: str, arguments: dict[str, Any]
+        self,
+        product_name: str,
+        arguments: dict[str, Any],
+        *,
+        tool_name: str | None = None,
     ) -> dict[str, Any]:
         product = self._product(product_name)
         request_hash = canonical_hash(arguments)
         response = await self._post_paid_route(product, arguments)
         response_payload = self._response_json(response)
         self.store.record_event(
-            f"get_{product.key}_payment",
+            tool_name or f"get_{product.key}_payment",
             "PAYMENT_CHALLENGE" if response.status_code == 402 else "PREPARE_FAILED",
             product=product.key,
             request_hash=request_hash,
@@ -540,7 +546,9 @@ class EvidenceMCPService:
         async def get_example_payment(product: str) -> dict[str, Any]:
             resolved = self._product(product)
             arguments = dict(resolved.example)
-            result = await self._prepare_payment(resolved.key, arguments)
+            result = await self._prepare_payment(
+                resolved.key, arguments, tool_name="get_example_payment"
+            )
             return {**result, "example": True, "arguments": arguments}
 
         @server.tool(
