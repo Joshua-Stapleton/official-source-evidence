@@ -54,6 +54,7 @@ CLEARLY_PUBLISHED_EXAMPLE_REQUEST_HASHES = frozenset(
         "da427d1347c3266d956b5b52582e707b051761ee40e97003ea6bdd44d3ab2a1b",
         "86f7e78a32c7764d5e681d728642fc898f5b3396a44b1f0147e8a476d552bcde",
         "6dfe2d0796a21bec01be61cd6bba55c618d271a3b1e25e8d94130475d7a7f503",
+        "6edbf1c8ccb8c2aeda8e50041d62770bc67be81b57e0089b0237294f6c28279b",
     }
 )
 FORM_D_DOSSIER_PARSER_VERSION = "sec-form-d-company-dossier/0.1.0"
@@ -643,6 +644,11 @@ class EvidenceService:
                     canonical_request_hash TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS published_example_requests (
+                    canonical_request_hash TEXT PRIMARY KEY,
+                    route TEXT NOT NULL,
+                    first_published_at TEXT NOT NULL
+                );
                 """
             )
             existing_columns = {
@@ -675,6 +681,21 @@ class EvidenceService:
                 CREATE INDEX IF NOT EXISTS idx_evidence_attempts_request_fingerprint
                 ON evidence_attempts(request_fingerprint_hmac, timestamp_utc)
                 """
+            )
+
+    def register_published_examples(self, examples: dict[str, dict[str, Any]]) -> None:
+        published_at = utc_now()
+        with self._connect() as connection:
+            connection.executemany(
+                """
+                INSERT OR IGNORE INTO published_example_requests (
+                    canonical_request_hash, route, first_published_at
+                ) VALUES (?, ?, ?)
+                """,
+                [
+                    (sha256_json(payload), route, published_at)
+                    for route, payload in examples.items()
+                ],
             )
 
     def _load_or_create_signing_key(self) -> Ed25519PrivateKey:
@@ -3216,6 +3237,15 @@ class EvidenceService:
                 ORDER BY owner_or_test_flag, response_status
                 """
             ).fetchall()
+            published_example_rows = connection.execute(
+                """
+                SELECT canonical_request_hash
+                FROM published_example_requests
+                """
+            ).fetchall()
+        published_example_request_hashes = CLEARLY_PUBLISHED_EXAMPLE_REQUEST_HASHES | {
+            row["canonical_request_hash"] for row in published_example_rows
+        }
         status = {
             "generated_at": utc_now(),
             "metrics": [dict(row) for row in rows],
@@ -3459,10 +3489,7 @@ class EvidenceService:
                 price = Decimal(0)
             route_independent_revenue[route] += price
             independent_revenue += price
-            if (
-                row["canonical_request_hash"]
-                in CLEARLY_PUBLISHED_EXAMPLE_REQUEST_HASHES
-            ):
+            if row["canonical_request_hash"] in published_example_request_hashes:
                 catalog_sample_calls += 1
                 catalog_sample_revenue += price
                 catalog_sample_direct_cost += direct_cost

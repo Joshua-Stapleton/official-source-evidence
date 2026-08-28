@@ -244,6 +244,21 @@ def utc_now() -> str:
 
 
 evidence_service = EvidenceService()
+evidence_service.register_published_examples(
+    {
+        "/v1/web/source-snapshot": SOURCE_SNAPSHOT_PROBE_PAYLOAD,
+        "/v1/monitors/source-change": SOURCE_WATCH_PROBE_PAYLOAD,
+        "/v1/monitors/source-change-portfolio": PORTFOLIO_WATCH_PROBE_PAYLOAD,
+        "/v1/gtm/form-d-funding-leads": FORM_D_PROBE_PAYLOAD,
+        "/v1/gtm/form-d-company-dossier": FORM_D_DOSSIER_PROBE_PAYLOAD,
+        "/v1/ofac/payment-preflight": OFAC_PREFLIGHT_PROBE_PAYLOAD,
+        "/v1/sec/filing-change-signal": SEC_SIGNAL_PROBE_PAYLOAD,
+        "/v1/sec/filing-trigger-delta": SEC_PROBE_PAYLOAD,
+        "/v1/ofac/exact-identifier-evidence": OFAC_PROBE_PAYLOAD,
+        "/v1/procure/company-profile": COMPANY_PROFILE_PROBE_PAYLOAD,
+        "/v1/compute/python-run": PYTHON_RUN_PROBE_PAYLOAD,
+    }
+)
 monitor_service = WebMonitorService(evidence_service.db_path)
 the402_provider = The402Provider(evidence_service.db_path, monitor_service)
 GTM_DOSSIER_ENABLED = os.getenv("AUTONOMOUS_GTM_DOSSIER_ENABLED", "0") == "1"

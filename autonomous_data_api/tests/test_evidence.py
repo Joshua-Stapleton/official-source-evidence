@@ -19,6 +19,7 @@ from autonomous_data_api.evidence import (
     SecSignalRequest,
     SourceSnapshot,
     sha256_bytes,
+    sha256_json,
 )
 
 OFAC_FIXTURE = b"""<?xml version="1.0"?>
@@ -879,6 +880,63 @@ def test_conversion_experiment_excludes_probes_and_owner_payments(
     )
     assert sec_signal["independent_paid_or_settlement_failures"] == 1
     assert sec_signal["independent_paid_fulfillment_rate_percent"] == 50.0
+
+
+def test_published_example_history_survives_probe_payload_changes(
+    tmp_path, monkeypatch
+):
+    evidence = service(tmp_path, monkeypatch)
+    route = "/v1/gtm/form-d-funding-leads"
+    old_published_payload = {
+        "since": "2026-08-23T07:49:08Z",
+        "states": [],
+        "limit": 10,
+    }
+    old_hash = sha256_json(old_published_payload)
+    evidence.register_published_examples({route: old_published_payload})
+    evidence.register_published_examples(
+        {
+            route: {
+                "since": "2026-08-28T07:49:08Z",
+                "states": [],
+                "limit": 10,
+            }
+        }
+    )
+
+    with evidence._connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO evidence_attempts (
+                request_id, timestamp_utc, route, canonical_request_hash,
+                response_hash, source_bundle_hash, quoted_price, network,
+                payer_wallet_hmac, owner_or_test_flag, response_status,
+                latency_ms, created_at
+            ) VALUES (
+                'old-example', '2026-08-28T08:00:00Z', ?, ?,
+                'response-hash', 'source-hash', '$0.05', 'eip155:8453',
+                'external-buyer', 'NON_OWNER_UNVERIFIED', 'FULFILLED',
+                10, '2026-08-28T08:00:00Z'
+            )
+            """,
+            (route, old_hash),
+        )
+
+    experiment = evidence.experiment_status("2026-08-01T00:00:00Z")[
+        "conversion_experiment"
+    ]
+    assert experiment["independent_revenue_usd"] == "0.05"
+    assert experiment["paid_catalog_sample_calls"] == 1
+    assert experiment["paid_catalog_sample_revenue_usd"] == "0.05"
+    assert experiment["validated_product_demand_calls"] == 0
+    with evidence._connect() as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM published_example_requests WHERE route = ?",
+                (route,),
+            ).fetchone()[0]
+            == 2
+        )
 
 
 def test_attempt_attribution_is_migrated_hashed_and_safely_aggregated(
