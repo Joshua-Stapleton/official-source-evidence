@@ -838,14 +838,20 @@ def test_conversion_experiment_excludes_probes_and_owner_payments(
     assert experiment["paid_catalog_sample_calls"] == 1
     assert experiment["paid_catalog_sample_buyer_clusters"] == 1
     assert experiment["paid_catalog_sample_revenue_usd"] == "0.01"
-    assert experiment["validated_product_demand_calls"] == 3
-    assert experiment["validated_product_demand_buyer_clusters"] == 3
+    assert experiment["non_catalog_paid_calls"] == 3
+    assert experiment["non_catalog_buyer_clusters"] == 3
+    assert experiment["non_catalog_revenue_usd"] == "1.02"
+    assert experiment["unattributed_non_catalog_paid_calls"] == 3
+    assert experiment["unattributed_non_catalog_buyer_clusters"] == 3
+    assert experiment["unattributed_non_catalog_revenue_usd"] == "1.02"
+    assert experiment["validated_product_demand_calls"] == 0
+    assert experiment["validated_product_demand_buyer_clusters"] == 0
     assert experiment["validated_product_demand_repeat_buyers"] == 0
-    assert experiment["validated_product_demand_revenue_usd"] == "1.02"
-    assert experiment["validated_product_demand_max_buyer_call_share"] == 0.3333
+    assert experiment["validated_product_demand_revenue_usd"] == "0.00"
+    assert experiment["validated_product_demand_max_buyer_call_share"] is None
     assert experiment["independent_paid_fulfillment_rate_percent"] == 80.0
     assert experiment["max_independent_buyer_call_share"] == 0.5
-    assert experiment["gates"]["no_buyer_above_50_percent_of_calls"] is True
+    assert experiment["gates"]["no_buyer_above_50_percent_of_calls"] is False
     source_watch = next(
         route
         for route in experiment["routes"]
@@ -871,8 +877,10 @@ def test_conversion_experiment_excludes_probes_and_owner_payments(
     assert preflight["repeat_independent_buyer_clusters"] == 1
     assert preflight["paid_catalog_sample_calls"] == 1
     assert preflight["paid_catalog_sample_revenue_usd"] == "0.01"
-    assert preflight["validated_product_demand_calls"] == 1
-    assert preflight["validated_product_demand_revenue_usd"] == "0.01"
+    assert preflight["non_catalog_paid_calls"] == 1
+    assert preflight["unattributed_non_catalog_paid_calls"] == 1
+    assert preflight["validated_product_demand_calls"] == 0
+    assert preflight["validated_product_demand_revenue_usd"] == "0.00"
     sec_signal = next(
         route
         for route in experiment["routes"]
@@ -937,6 +945,101 @@ def test_published_example_history_survives_probe_payload_changes(
             ).fetchone()[0]
             == 2
         )
+
+
+def test_catalog_observations_and_intent_attribution_are_separated(
+    tmp_path, monkeypatch
+):
+    evidence = service(tmp_path, monkeypatch)
+    route = "/v1/gtm/form-d-funding-leads"
+    rows = [
+        (
+            "directory-probe",
+            "2026-08-30T00:00:00Z",
+            "rotating-directory-hash",
+            None,
+            "PAYMENT_REQUIRED",
+            "x402-list",
+            None,
+        ),
+        (
+            "directory-payment",
+            "2026-08-30T01:00:00Z",
+            "rotating-directory-hash",
+            "catalog-buyer",
+            "FULFILLED",
+            None,
+            None,
+        ),
+        (
+            "unattributed-payment",
+            "2026-08-30T02:00:00Z",
+            "unattributed-custom-hash",
+            "unattributed-buyer",
+            "FULFILLED",
+            None,
+            None,
+        ),
+        (
+            "attributed-payment",
+            "2026-08-30T03:00:00Z",
+            "attributed-custom-hash",
+            "attributed-buyer",
+            "FULFILLED",
+            None,
+            "direct",
+        ),
+    ]
+    with evidence._connect() as connection:
+        connection.executemany(
+            """
+            INSERT INTO evidence_attempts (
+                request_id, timestamp_utc, route, canonical_request_hash,
+                response_hash, source_bundle_hash, quoted_price, network,
+                payer_wallet_hmac, owner_or_test_flag, response_status,
+                latency_ms, user_agent_family, discovery_source, created_at
+            ) VALUES (
+                ?, ?, ?, ?, 'response-hash', 'source-hash', '$0.05',
+                'eip155:8453', ?, 'NON_OWNER_UNVERIFIED', ?, 10, ?, ?, ?
+            )
+            """,
+            [
+                (
+                    request_id,
+                    timestamp,
+                    route,
+                    request_hash,
+                    payer,
+                    response_status,
+                    user_agent_family,
+                    discovery_source,
+                    timestamp,
+                )
+                for (
+                    request_id,
+                    timestamp,
+                    request_hash,
+                    payer,
+                    response_status,
+                    user_agent_family,
+                    discovery_source,
+                ) in rows
+            ],
+        )
+
+    experiment = evidence.experiment_status("2026-08-01T00:00:00Z")[
+        "conversion_experiment"
+    ]
+    assert experiment["independent_fulfilled_calls"] == 3
+    assert experiment["independent_revenue_usd"] == "0.15"
+    assert experiment["paid_catalog_sample_calls"] == 1
+    assert experiment["paid_catalog_sample_revenue_usd"] == "0.05"
+    assert experiment["non_catalog_paid_calls"] == 2
+    assert experiment["non_catalog_revenue_usd"] == "0.10"
+    assert experiment["unattributed_non_catalog_paid_calls"] == 1
+    assert experiment["unattributed_non_catalog_revenue_usd"] == "0.05"
+    assert experiment["validated_product_demand_calls"] == 1
+    assert experiment["validated_product_demand_revenue_usd"] == "0.05"
 
 
 def test_attempt_attribution_is_migrated_hashed_and_safely_aggregated(

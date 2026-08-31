@@ -56,8 +56,10 @@ CLEARLY_PUBLISHED_EXAMPLE_REQUEST_HASHES = frozenset(
         "6dfe2d0796a21bec01be61cd6bba55c618d271a3b1e25e8d94130475d7a7f503",
         "6edbf1c8ccb8c2aeda8e50041d62770bc67be81b57e0089b0237294f6c28279b",
         "c8552ee23e66018fd8a07fd827114e8c625b8be1912545339bb8e66679db9a9b",
+        "5e621ac65175d29eaa18ba0a53fbfadbe19b15372cf53d50e9b60c70b8b55d27",
     }
 )
+CATALOG_DISCOVERY_SOURCES = frozenset({"coinbase-bazaar", "x402-list", "x402scan"})
 FORM_D_DOSSIER_PARSER_VERSION = "sec-form-d-company-dossier/0.1.0"
 PROCUREMENT_PROFILE_VERSION = "company-profile-procurement/0.1.0"
 PYTHON_RUN_VERSION = "isolated-python-run/0.1.0"
@@ -3166,7 +3168,8 @@ class EvidenceService:
                     """
                     SELECT route, timestamp_utc, quoted_price, payer_wallet_hmac,
                            canonical_request_hash, owner_or_test_flag,
-                           response_status, direct_cost_estimate
+                           response_status, direct_cost_estimate,
+                           discovery_source, agent_run_id_hmac
                     FROM evidence_attempts
                     WHERE timestamp_utc >= ?
                     ORDER BY timestamp_utc
@@ -3244,9 +3247,18 @@ class EvidenceService:
                 FROM published_example_requests
                 """
             ).fetchall()
-        published_example_request_hashes = CLEARLY_PUBLISHED_EXAMPLE_REQUEST_HASHES | {
-            row["canonical_request_hash"] for row in published_example_rows
-        }
+            catalog_observed_rows = connection.execute(
+                """
+                SELECT DISTINCT canonical_request_hash
+                FROM evidence_attempts
+                WHERE user_agent_family IN ('coinbase-cdp', 'x402-list', 'x402scan')
+                """
+            ).fetchall()
+        published_example_request_hashes = (
+            CLEARLY_PUBLISHED_EXAMPLE_REQUEST_HASHES
+            | {row["canonical_request_hash"] for row in published_example_rows}
+            | {row["canonical_request_hash"] for row in catalog_observed_rows}
+        )
         status = {
             "generated_at": utc_now(),
             "metrics": [dict(row) for row in rows],
@@ -3379,6 +3391,13 @@ class EvidenceService:
         catalog_sample_revenue = Decimal(0)
         catalog_sample_direct_cost = Decimal(0)
         catalog_sample_payers: set[str] = set()
+        non_catalog_calls = 0
+        non_catalog_revenue = Decimal(0)
+        non_catalog_direct_cost = Decimal(0)
+        non_catalog_payers: set[str] = set()
+        unattributed_non_catalog_calls = 0
+        unattributed_non_catalog_revenue = Decimal(0)
+        unattributed_non_catalog_payers: set[str] = set()
         validated_demand_calls = 0
         validated_demand_revenue = Decimal(0)
         validated_demand_direct_cost = Decimal(0)
@@ -3404,6 +3423,12 @@ class EvidenceService:
                 "paid_catalog_sample_calls": 0,
                 "paid_catalog_sample_buyer_clusters": 0,
                 "paid_catalog_sample_revenue_usd": "0.00",
+                "non_catalog_paid_calls": 0,
+                "non_catalog_buyer_clusters": 0,
+                "non_catalog_revenue_usd": "0.00",
+                "unattributed_non_catalog_paid_calls": 0,
+                "unattributed_non_catalog_buyer_clusters": 0,
+                "unattributed_non_catalog_revenue_usd": "0.00",
                 "validated_product_demand_calls": 0,
                 "validated_product_demand_buyer_clusters": 0,
                 "validated_product_demand_revenue_usd": "0.00",
@@ -3429,6 +3454,18 @@ class EvidenceService:
             route: set() for route in funnels
         }
         route_catalog_sample_revenue: dict[str, Decimal] = {
+            route: Decimal(0) for route in funnels
+        }
+        route_non_catalog_payers: dict[str, set[str]] = {
+            route: set() for route in funnels
+        }
+        route_non_catalog_revenue: dict[str, Decimal] = {
+            route: Decimal(0) for route in funnels
+        }
+        route_unattributed_non_catalog_payers: dict[str, set[str]] = {
+            route: set() for route in funnels
+        }
+        route_unattributed_non_catalog_revenue: dict[str, Decimal] = {
             route: Decimal(0) for route in funnels
         }
         route_validated_demand_payers: dict[str, set[str]] = {
@@ -3499,6 +3536,29 @@ class EvidenceService:
                 route_catalog_sample_payers[route].add(payer)
                 route_catalog_sample_revenue[route] += price
             else:
+                non_catalog_calls += 1
+                non_catalog_revenue += price
+                non_catalog_direct_cost += direct_cost
+                non_catalog_payers.add(payer)
+                funnels[route]["non_catalog_paid_calls"] += 1
+                route_non_catalog_payers[route].add(payer)
+                route_non_catalog_revenue[route] += price
+                discovery_source = (row["discovery_source"] or "").casefold()
+                has_intent_attribution = bool(
+                    row["agent_run_id_hmac"]
+                    or (
+                        discovery_source
+                        and discovery_source not in CATALOG_DISCOVERY_SOURCES
+                    )
+                )
+                if not has_intent_attribution:
+                    unattributed_non_catalog_calls += 1
+                    unattributed_non_catalog_revenue += price
+                    unattributed_non_catalog_payers.add(payer)
+                    funnels[route]["unattributed_non_catalog_paid_calls"] += 1
+                    route_unattributed_non_catalog_payers[route].add(payer)
+                    route_unattributed_non_catalog_revenue[route] += price
+                    continue
                 validated_demand_calls += 1
                 validated_demand_revenue += price
                 validated_demand_direct_cost += direct_cost
@@ -3531,6 +3591,16 @@ class EvidenceService:
             )
             funnel["paid_catalog_sample_revenue_usd"] = (
                 f"{route_catalog_sample_revenue[route]:.2f}"
+            )
+            funnel["non_catalog_buyer_clusters"] = len(route_non_catalog_payers[route])
+            funnel["non_catalog_revenue_usd"] = (
+                f"{route_non_catalog_revenue[route]:.2f}"
+            )
+            funnel["unattributed_non_catalog_buyer_clusters"] = len(
+                route_unattributed_non_catalog_payers[route]
+            )
+            funnel["unattributed_non_catalog_revenue_usd"] = (
+                f"{route_unattributed_non_catalog_revenue[route]:.2f}"
             )
             funnel["validated_product_demand_buyer_clusters"] = len(
                 route_validated_demand_payers[route]
@@ -3583,6 +3653,17 @@ class EvidenceService:
             "paid_catalog_sample_direct_cost_usd": (
                 f"{catalog_sample_direct_cost:.2f}"
             ),
+            "non_catalog_paid_calls": non_catalog_calls,
+            "non_catalog_buyer_clusters": len(non_catalog_payers),
+            "non_catalog_revenue_usd": f"{non_catalog_revenue:.2f}",
+            "non_catalog_direct_cost_usd": f"{non_catalog_direct_cost:.2f}",
+            "unattributed_non_catalog_paid_calls": unattributed_non_catalog_calls,
+            "unattributed_non_catalog_buyer_clusters": len(
+                unattributed_non_catalog_payers
+            ),
+            "unattributed_non_catalog_revenue_usd": (
+                f"{unattributed_non_catalog_revenue:.2f}"
+            ),
             "validated_product_demand_calls": validated_demand_calls,
             "validated_product_demand_buyer_clusters": validated_demand_buyers,
             "validated_product_demand_repeat_buyers": (validated_demand_repeat_buyers),
@@ -3627,7 +3708,9 @@ class EvidenceService:
                 "Owner and testnet payments are excluded from every conversion gate.",
                 "Unpaid 402 challenges include monitors and crawlers, so they are not treated as buyers or a conversion denominator.",
                 "A repeat buyer must fulfill calls on at least two distinct UTC dates.",
-                "Commercial scale gates count only non-example paid requests; published catalog samples remain cash revenue but are excluded from product-demand validation.",
+                "Catalog samples include published request hashes and any hash observed from a known directory or marketplace monitor.",
+                "Non-catalog calls without an agent-run identifier or a non-catalog declared discovery source remain unattributed and do not pass commercial scale gates.",
+                "Commercial scale gates count only attributable non-catalog paid requests; catalog samples remain cash revenue but are excluded from product-demand validation.",
             ],
         }
         return status
