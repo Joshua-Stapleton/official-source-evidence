@@ -400,12 +400,20 @@ def test_machine_discovery_and_crawler_surfaces(client):
         }
         assert operation["responses"]["402"]["description"] == "Payment Required"
         assert operation["requestBody"]["content"]["application/json"]["example"]
-        assert operation["requestBody"].get("required", False) is False
+        assert operation["requestBody"]["required"] is True
+        assert (
+            operation["requestBody"]["content"]["application/json"]["schema"]["type"]
+            == "object"
+        )
         assert operation["x-monitoring-probe"] == {
             "method": "POST",
             "body": "omitted",
             "expected_status": 402,
         }
+
+    assert schema["paths"]["/v1/web/source-snapshot"]["post"]["requestBody"]["content"][
+        "application/json"
+    ]["schema"]["required"] == ["url"]
 
     sec_properties = schema["components"]["schemas"]["SecDeltaRequest"]["properties"]
     assert sec_properties["cik"]["example"] == "0000320193"
@@ -426,6 +434,7 @@ def test_machine_discovery_and_crawler_surfaces(client):
     assert "/v1/sec/filing-trigger-delta - $0.10 USDC" in llms.text
     assert "/v1/monitors/source-change - $1.00 USDC" in llms.text
     assert "/v1/monitors/source-change-portfolio - $9.00 USDC" in llms.text
+    assert "/v1/capability-requests" in llms.text
 
     robots = client.get("/robots.txt")
     assert robots.status_code == 200
@@ -450,6 +459,41 @@ def test_machine_discovery_and_crawler_surfaces(client):
         and resource["price"] == "$0.01"
         for resource in x402_payload["resources"]
     )
+
+
+def test_free_capability_request_is_private_deduplicated_and_advertised(client):
+    payload = {
+        "job_to_be_done": "Verify a supplier before an autonomous purchase",
+        "current_alternative": "Search the web and compare sources manually",
+        "decision_criteria": ["freshness", "source coverage", "signed result"],
+        "max_budget_usd": "0.25",
+        "max_latency_seconds": 10,
+        "required_output_fields": ["decision", "sources", "confidence"],
+    }
+    first = client.post("/v1/capability-requests", json=payload)
+    assert first.status_code == 202
+    assert first.json()["accepted"] is True
+    assert first.json()["duplicate"] is False
+    assert first.json()["payment_required"] is False
+    assert first.headers["x-agent-feedback-url"].endswith("/v1/capability-requests")
+
+    duplicate = client.post("/v1/capability-requests", json=payload)
+    assert duplicate.status_code == 202
+    assert duplicate.json()["request_id"] == first.json()["request_id"]
+    assert duplicate.json()["duplicate"] is True
+
+    manifest = client.get("/.well-known/agent-service.json").json()
+    assert manifest["buyer_feedback"] == {
+        "method": "POST",
+        "url": "http://localhost:8765/v1/capability-requests",
+        "payment_required": False,
+        "purpose": "Request a machine capability and state buying criteria.",
+    }
+
+    invalid = client.post(
+        "/v1/capability-requests", json={"job_to_be_done": "too short"}
+    )
+    assert invalid.status_code == 422
 
 
 @pytest.mark.parametrize(

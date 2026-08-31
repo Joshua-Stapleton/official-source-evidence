@@ -28,7 +28,7 @@ from fastapi.responses import (
     RedirectResponse,
     Response,
 )
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.base import BaseHTTPMiddleware
 from x402.extensions.bazaar import OutputConfig, declare_discovery_extension
@@ -388,6 +388,16 @@ app = FastAPI(
     contact={"name": "Regulavita", "email": "joshua@regulavita.com"},
     lifespan=lifespan,
 )
+
+
+class CapabilityRequest(BaseModel):
+    job_to_be_done: str = Field(min_length=10, max_length=2000)
+    current_alternative: str = Field(default="", max_length=1000)
+    decision_criteria: list[str] = Field(default_factory=list, max_length=12)
+    max_budget_usd: str | None = Field(default=None, max_length=32)
+    max_latency_seconds: int | None = Field(default=None, ge=1, le=2_592_000)
+    required_output_fields: list[str] = Field(default_factory=list, max_length=40)
+    contact_uri: str | None = Field(default=None, max_length=500)
 
 
 def get_discovery_extension(method: str = "GET", **kwargs: Any) -> dict[str, Any]:
@@ -2324,6 +2334,18 @@ class LegacyOriginRetirementMiddleware(BaseHTTPMiddleware):
 app.add_middleware(LegacyOriginRetirementMiddleware)
 
 
+class AgentFeedbackDiscoveryMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next: Any):
+        response = await call_next(request)
+        response.headers["X-Agent-Feedback-URL"] = (
+            f"{PUBLIC_BASE_URL.rstrip('/')}/v1/capability-requests"
+        )
+        return response
+
+
+app.add_middleware(AgentFeedbackDiscoveryMiddleware)
+
+
 @app.get("/health")
 def health() -> dict[str, Any]:
     return {
@@ -2403,7 +2425,29 @@ def health() -> dict[str, Any]:
             "transport": "streamable-http",
             "stats": evidence_mcp_service.store.public_stats(),
         },
+        "buyer_feedback": {
+            "method": "POST",
+            "url": f"{PUBLIC_BASE_URL.rstrip('/')}/v1/capability-requests",
+            "payment_required": False,
+        },
     }
+
+
+@app.post(
+    "/v1/capability-requests",
+    status_code=202,
+    summary="Request a capability",
+    description=(
+        "Tell the operator what machine service you would pay for, including the "
+        "current alternative, decision criteria, budget, latency, and output contract. "
+        "The request is free, private, deduplicated, and never triggers automatic contact."
+    ),
+)
+def create_capability_request(payload: CapabilityRequest) -> dict[str, Any]:
+    try:
+        return evidence_mcp_service.submit_capability_request(**payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.get("/", include_in_schema=False)
@@ -2510,6 +2554,7 @@ Brokered machine-service procurement, long-running monitoring jobs, and pay-per-
 - x402 compatibility manifest: {base_url}/.well-known/x402
 - Agent manifest: {base_url}/.well-known/agent-service.json
 - Interactive docs: {base_url}/docs
+- Free buyer request: POST {base_url}/v1/capability-requests - tell the operator what machine service you would pay for, your budget, latency, decision criteria, and required output fields.
 - Isolated Python Runner sample: {base_url}/v1/compute/python-run/sample
 - Isolated Python Runner free quote: {base_url}/v1/compute/python-run/quote
 - Company Profile Procurement sample: {base_url}/v1/procure/company-profile/sample
@@ -2587,6 +2632,12 @@ def agent_manifest() -> dict[str, Any]:
             "url": f"{base_url}/mcp/",
             "authentication": "none",
             "payment": "x402-v2 within paid tool workflow",
+        },
+        "buyer_feedback": {
+            "method": "POST",
+            "url": f"{base_url}/v1/capability-requests",
+            "payment_required": False,
+            "purpose": "Request a machine capability and state buying criteria.",
         },
         "sample_endpoints": [
             f"{base_url}/v1/compute/python-run/sample",
@@ -3563,6 +3614,7 @@ def custom_openapi() -> dict[str, Any]:
                 "One-shot public HTTPS content extraction with normalized text, "
                 "optional literal excerpts, a content hash, and a signed receipt."
             ),
+            "request_model": "PublicSourceSnapshotRequest",
         },
         "/v1/monitors/source-change": {
             "price": f"{price_decimal(X402_SOURCE_WATCH_PRICE):.6f}",
@@ -3572,6 +3624,7 @@ def custom_openapi() -> dict[str, Any]:
                 "HTML, JSON, or XML source. Checks every six hours and includes "
                 "private polling plus optional HMAC-signed webhooks."
             ),
+            "request_model": "WebMonitorCreateRequest",
         },
         "/v1/monitors/source-change-portfolio": {
             "price": f"{price_decimal(X402_PORTFOLIO_WATCH_PRICE):.6f}",
@@ -3581,6 +3634,7 @@ def custom_openapi() -> dict[str, Any]:
                 "portfolio. Checks every six hours and returns private polling "
                 "tokens plus optional HMAC-signed webhooks for each source."
             ),
+            "request_model": "PortfolioMonitorCreateRequest",
         },
         "/v1/gtm/form-d-funding-leads": {
             "price": f"{price_decimal(X402_FORM_D_PRICE):.6f}",
@@ -3590,6 +3644,7 @@ def custom_openapi() -> dict[str, Any]:
                 "GTM workflows, with reported amount sold, related people, and "
                 "official filing links."
             ),
+            "request_model": "FormDFundingLeadsRequest",
         },
         "/v1/ofac/payment-preflight": {
             "price": f"{price_decimal(X402_OFAC_PREFLIGHT_PRICE):.6f}",
@@ -3598,6 +3653,7 @@ def custom_openapi() -> dict[str, Any]:
                 "Compact exact OFAC address decision for an autonomous payment "
                 "preflight. The result is not a sanctions clearance."
             ),
+            "request_model": "OfacPreflightRequest",
         },
         "/v1/sec/filing-change-signal": {
             "price": f"{price_decimal(X402_SEC_SIGNAL_PRICE):.6f}",
@@ -3606,6 +3662,7 @@ def custom_openapi() -> dict[str, Any]:
                 "Compact SEC 8-K, 10-Q, or 10-K filing-presence signal from a "
                 "ticker or CIK and UTC timestamp."
             ),
+            "request_model": "SecSignalRequest",
         },
         "/v1/sec/filing-trigger-delta": {
             "price": f"{price_decimal(X402_SEC_PRICE):.6f}",
@@ -3614,6 +3671,7 @@ def custom_openapi() -> dict[str, Any]:
                 "Premium SEC filing evidence with official document hashes, "
                 "selected deterministic XBRL deltas, and a signed receipt."
             ),
+            "request_model": "SecDeltaRequest",
         },
         "/v1/ofac/exact-identifier-evidence": {
             "price": f"{price_decimal(X402_OFAC_PRICE):.6f}",
@@ -3622,6 +3680,7 @@ def custom_openapi() -> dict[str, Any]:
                 "Premium exact OFAC identifier evidence with source hashes, "
                 "matching records, and a signed receipt."
             ),
+            "request_model": "OfacExactRequest",
         },
     }
     if PROCUREMENT_READY:
@@ -3654,6 +3713,7 @@ def custom_openapi() -> dict[str, Any]:
                 "Form D facts with fresh web research, source hashes, upstream "
                 "settlement provenance, and a signed receipt."
             ),
+            "request_model": "FormDCompanyDossierRequest",
         }
     sec_properties = schema["components"]["schemas"]["SecDeltaRequest"]["properties"]
     sec_properties["ticker"]["example"] = "AAPL"
@@ -3701,9 +3761,8 @@ def custom_openapi() -> dict[str, Any]:
                 )
                 content["example"] = paid["example"]
                 if request_model := paid.get("request_model"):
-                    content["schema"] = {
-                        "$ref": f"#/components/schemas/{request_model}"
-                    }
+                    content["schema"] = schema["components"]["schemas"][request_model]
+                operation["requestBody"]["required"] = True
             elif path == "/v1/monitors/{monitor_id}" and method in {"get", "delete"}:
                 operation["security"] = [{"MonitorBearer": []}]
             else:

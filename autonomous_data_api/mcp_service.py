@@ -391,6 +391,75 @@ class EvidenceMCPService:
             raise ValueError(f"Unknown product. Choose one of: {choices}")
         return resolved
 
+    def submit_capability_request(
+        self,
+        *,
+        job_to_be_done: str,
+        current_alternative: str = "",
+        decision_criteria: list[str] | None = None,
+        max_budget_usd: str | None = None,
+        max_latency_seconds: int | None = None,
+        required_output_fields: list[str] | None = None,
+        contact_uri: str | None = None,
+    ) -> dict[str, Any]:
+        """Validate and store one buyer request from MCP or REST."""
+        job = job_to_be_done.strip()
+        if not 10 <= len(job) <= 2000:
+            raise ValueError("job_to_be_done must contain 10-2000 characters")
+        alternative = current_alternative.strip()
+        if len(alternative) > 1000:
+            raise ValueError("current_alternative must be at most 1000 characters")
+        criteria = [item.strip() for item in (decision_criteria or []) if item.strip()]
+        fields = [
+            item.strip() for item in (required_output_fields or []) if item.strip()
+        ]
+        if len(criteria) > 12 or any(len(item) > 240 for item in criteria):
+            raise ValueError(
+                "decision_criteria supports up to 12 items of 240 characters"
+            )
+        if len(fields) > 40 or any(len(item) > 120 for item in fields):
+            raise ValueError(
+                "required_output_fields supports up to 40 short field names"
+            )
+        if (
+            max_latency_seconds is not None
+            and not 1 <= max_latency_seconds <= 2_592_000
+        ):
+            raise ValueError("max_latency_seconds must be between 1 and 2592000")
+        if max_budget_usd is not None:
+            max_budget_usd = max_budget_usd.strip()
+            if len(max_budget_usd) > 32:
+                raise ValueError("max_budget_usd must be a short decimal string")
+        if contact_uri:
+            contact_uri = contact_uri.strip()
+            parsed = urlparse(contact_uri)
+            if len(contact_uri) > 500 or parsed.scheme not in {"https", "mailto"}:
+                raise ValueError("contact_uri must be an HTTPS or mailto URI")
+        payload = {
+            "job_to_be_done": job,
+            "current_alternative": alternative or None,
+            "decision_criteria": criteria,
+            "max_budget_usd": max_budget_usd or None,
+            "max_latency_seconds": max_latency_seconds,
+            "required_output_fields": fields,
+            "contact_uri": contact_uri,
+        }
+        request_id, duplicate = self.store.submit_capability(payload)
+        self.store.record_event(
+            "request_capability",
+            "CAPABILITY_DUPLICATE" if duplicate else "CAPABILITY_ACCEPTED",
+            request_hash=canonical_hash(payload),
+        )
+        return {
+            "accepted": True,
+            "request_id": request_id,
+            "duplicate": duplicate,
+            "payment_required": False,
+            "operator_review": (
+                "Requests are reviewed for repeated demand and economic viability."
+            ),
+        }
+
     async def _post_paid_route(
         self,
         product: MCPProduct,
@@ -567,60 +636,15 @@ class EvidenceMCPService:
             required_output_fields: list[str] | None = None,
             contact_uri: str | None = None,
         ) -> dict[str, Any]:
-            job = job_to_be_done.strip()
-            if not 10 <= len(job) <= 2000:
-                raise ValueError("job_to_be_done must contain 10-2000 characters")
-            alternative = current_alternative.strip()
-            if len(alternative) > 1000:
-                raise ValueError("current_alternative must be at most 1000 characters")
-            criteria = [
-                item.strip() for item in (decision_criteria or []) if item.strip()
-            ]
-            fields = [
-                item.strip() for item in (required_output_fields or []) if item.strip()
-            ]
-            if len(criteria) > 12 or any(len(item) > 240 for item in criteria):
-                raise ValueError(
-                    "decision_criteria supports up to 12 items of 240 characters"
-                )
-            if len(fields) > 40 or any(len(item) > 120 for item in fields):
-                raise ValueError(
-                    "required_output_fields supports up to 40 short field names"
-                )
-            if (
-                max_latency_seconds is not None
-                and not 1 <= max_latency_seconds <= 2_592_000
-            ):
-                raise ValueError("max_latency_seconds must be between 1 and 2592000")
-            if max_budget_usd is not None and len(max_budget_usd) > 32:
-                raise ValueError("max_budget_usd must be a short decimal string")
-            if contact_uri:
-                contact_uri = contact_uri.strip()
-                parsed = urlparse(contact_uri)
-                if len(contact_uri) > 500 or parsed.scheme not in {"https", "mailto"}:
-                    raise ValueError("contact_uri must be an HTTPS or mailto URI")
-            payload = {
-                "job_to_be_done": job,
-                "current_alternative": alternative or None,
-                "decision_criteria": criteria,
-                "max_budget_usd": max_budget_usd,
-                "max_latency_seconds": max_latency_seconds,
-                "required_output_fields": fields,
-                "contact_uri": contact_uri,
-            }
-            request_id, duplicate = self.store.submit_capability(payload)
-            self.store.record_event(
-                "request_capability",
-                "CAPABILITY_DUPLICATE" if duplicate else "CAPABILITY_ACCEPTED",
-                request_hash=canonical_hash(payload),
+            return self.submit_capability_request(
+                job_to_be_done=job_to_be_done,
+                current_alternative=current_alternative,
+                decision_criteria=decision_criteria,
+                max_budget_usd=max_budget_usd,
+                max_latency_seconds=max_latency_seconds,
+                required_output_fields=required_output_fields,
+                contact_uri=contact_uri,
             )
-            return {
-                "accepted": True,
-                "request_id": request_id,
-                "duplicate": duplicate,
-                "payment_required": False,
-                "operator_review": "Requests are reviewed for repeated demand and economic viability.",
-            }
 
         @server.tool(
             description=(
