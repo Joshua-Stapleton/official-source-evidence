@@ -2960,7 +2960,10 @@ def _monitor_access_token(authorization: str | None) -> str:
     return token
 
 
-@app.post("/v1/monitors/source-change")
+@app.post(
+    "/v1/monitors/source-change",
+    summary="Monitor a webpage or public feed for changes",
+)
 def create_source_change_watch(
     request: Request,
     payload: WebMonitorCreateRequest | None = None,
@@ -2990,7 +2993,10 @@ def create_source_change_watch(
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
 
-@app.post("/v1/monitors/source-change-portfolio")
+@app.post(
+    "/v1/monitors/source-change-portfolio",
+    summary="Monitor 2-10 webpages or public feeds for changes",
+)
 def create_source_change_portfolio(
     request: Request,
     payload: PortfolioMonitorCreateRequest | None = None,
@@ -3167,6 +3173,7 @@ def sample_python_run() -> dict[str, Any]:
 @app.post(
     "/v1/compute/python-run",
     include_in_schema=PROCUREMENT_READY,
+    summary="Run Python code in an isolated sandbox",
 )
 async def run_python(
     request: Request,
@@ -3296,6 +3303,7 @@ def sample_company_profile_procurement() -> dict[str, Any]:
 @app.post(
     "/v1/procure/company-profile",
     include_in_schema=PROCUREMENT_READY,
+    summary="Research a company with current sources",
 )
 async def procure_company_profile(
     request: Request,
@@ -3408,7 +3416,10 @@ async def form_d_company_dossier(
     return prepared.result
 
 
-@app.post("/v1/web/source-snapshot")
+@app.post(
+    "/v1/web/source-snapshot",
+    summary="Extract text and evidence from a public webpage",
+)
 def public_source_snapshot(
     request: Request,
     payload: PublicSourceSnapshotRequest | None = None,
@@ -3420,7 +3431,10 @@ def public_source_snapshot(
     return prepared.result
 
 
-@app.post("/v1/ofac/payment-preflight")
+@app.post(
+    "/v1/ofac/payment-preflight",
+    summary="Check an Ethereum or EVM address against OFAC",
+)
 def ofac_payment_preflight(
     request: Request,
     payload: OfacPreflightRequest | None = None,
@@ -3432,7 +3446,10 @@ def ofac_payment_preflight(
     return prepared.result
 
 
-@app.post("/v1/sec/filing-change-signal")
+@app.post(
+    "/v1/sec/filing-change-signal",
+    summary="Check a company for a new SEC filing",
+)
 def sec_filing_change_signal(
     request: Request,
     payload: SecSignalRequest | None = None,

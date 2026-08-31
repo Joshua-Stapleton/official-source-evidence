@@ -414,6 +414,12 @@ def test_machine_discovery_and_crawler_surfaces(client):
     assert schema["paths"]["/v1/web/source-snapshot"]["post"]["requestBody"]["content"][
         "application/json"
     ]["schema"]["required"] == ["url"]
+    assert schema["paths"]["/v1/web/source-snapshot"]["post"]["summary"] == (
+        "Extract text and evidence from a public webpage"
+    )
+    assert schema["paths"]["/v1/ofac/payment-preflight"]["post"]["summary"] == (
+        "Check an Ethereum or EVM address against OFAC"
+    )
 
     sec_properties = schema["components"]["schemas"]["SecDeltaRequest"]["properties"]
     assert sec_properties["cik"]["example"] == "0000320193"
