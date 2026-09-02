@@ -7,6 +7,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from autonomous_data_api.evidence import (
+    KNOWN_CATALOG_REQUEST_HASHES,
     EvidenceService,
     FormDCompanyDossierRequest,
     FormDDossierSource,
@@ -850,6 +851,10 @@ def test_conversion_experiment_excludes_probes_and_owner_payments(
     assert experiment["validated_product_demand_revenue_usd"] == "0.00"
     assert experiment["validated_product_demand_max_buyer_call_share"] is None
     assert experiment["independent_paid_fulfillment_rate_percent"] == 80.0
+    assert experiment["catalog_payment_or_settlement_failures"] == 0
+    assert experiment["catalog_paid_fulfillment_rate_percent"] == 100.0
+    assert experiment["non_catalog_payment_or_settlement_failures"] == 1
+    assert experiment["non_catalog_paid_fulfillment_rate_percent"] == 75.0
     assert experiment["max_independent_buyer_call_share"] == 0.5
     assert experiment["gates"]["no_buyer_above_50_percent_of_calls"] is False
     source_watch = next(
@@ -888,6 +893,55 @@ def test_conversion_experiment_excludes_probes_and_owner_payments(
     )
     assert sec_signal["independent_paid_or_settlement_failures"] == 1
     assert sec_signal["independent_paid_fulfillment_rate_percent"] == 50.0
+    assert sec_signal["non_catalog_payment_or_settlement_failures"] == 1
+    assert sec_signal["non_catalog_paid_fulfillment_rate_percent"] == 50.0
+
+
+def test_catalog_payment_failure_does_not_reduce_commercial_reliability(
+    tmp_path, monkeypatch
+):
+    evidence = service(tmp_path, monkeypatch)
+    route = "/v1/ofac/payment-preflight"
+    catalog_hash = next(iter(KNOWN_CATALOG_REQUEST_HASHES))
+    rows = [
+        (
+            "catalog-failure",
+            catalog_hash,
+            "catalog-payer",
+            "PAYMENT_OR_SETTLEMENT_FAILED",
+        ),
+        ("commercial-success", "custom-request", "commercial-payer", "FULFILLED"),
+    ]
+    with evidence._connect() as connection:
+        connection.executemany(
+            """
+            INSERT INTO evidence_attempts (
+                request_id, timestamp_utc, route, canonical_request_hash,
+                response_hash, source_bundle_hash, quoted_price, network,
+                payer_wallet_hmac, owner_or_test_flag, response_status,
+                latency_ms, discovery_source, created_at
+            ) VALUES (
+                ?, '2026-09-02T00:00:00Z', ?, ?, 'response-hash',
+                'source-hash', '$0.01', 'eip155:8453', ?,
+                'NON_OWNER_UNVERIFIED', ?, 10, 'direct',
+                '2026-09-02T00:00:00Z'
+            )
+            """,
+            [
+                (request_id, route, request_hash, payer, response_status)
+                for request_id, request_hash, payer, response_status in rows
+            ],
+        )
+
+    experiment = evidence.experiment_status("2026-09-01T00:00:00Z")[
+        "conversion_experiment"
+    ]
+    assert experiment["independent_paid_fulfillment_rate_percent"] == 50.0
+    assert experiment["catalog_payment_or_settlement_failures"] == 1
+    assert experiment["catalog_paid_fulfillment_rate_percent"] == 0.0
+    assert experiment["non_catalog_payment_or_settlement_failures"] == 0
+    assert experiment["non_catalog_paid_fulfillment_rate_percent"] == 100.0
+    assert experiment["gates"]["paid_fulfillment_at_least_99_percent"] is True
 
 
 def test_published_example_history_survives_probe_payload_changes(

@@ -168,7 +168,24 @@ def test_payment_failure_diagnostics_does_not_persist_unknown_error_text():
 
     assert payment_failure_diagnostics(response, "signed") == (
         "verification",
-        "unclassified",
+        "verification_rejected",
+    )
+
+
+def test_payment_failure_diagnostics_uses_safe_settlement_fallback():
+    response = JSONResponse(
+        content={},
+        status_code=402,
+        headers={
+            "payment-response": encoded_header(
+                {"errorReason": "private upstream detail customer@example.com"}
+            )
+        },
+    )
+
+    assert payment_failure_diagnostics(response, "signed") == (
+        "settlement",
+        "settlement_rejected",
     )
 
 

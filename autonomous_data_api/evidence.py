@@ -48,7 +48,7 @@ OFAC_SOURCE_URLS = {
 }
 SEC_PARSER_VERSION = "sec-trigger-delta/0.2.0"
 FORM_D_PARSER_VERSION = "sec-form-d-funding-leads/0.1.0"
-CLEARLY_PUBLISHED_EXAMPLE_REQUEST_HASHES = frozenset(
+KNOWN_CATALOG_REQUEST_HASHES = frozenset(
     {
         "cadebf5dff6eb929195a1484118a75d4527d08dd58d98dc27f9afd9c39008e66",
         "da427d1347c3266d956b5b52582e707b051761ee40e97003ea6bdd44d3ab2a1b",
@@ -57,9 +57,12 @@ CLEARLY_PUBLISHED_EXAMPLE_REQUEST_HASHES = frozenset(
         "6edbf1c8ccb8c2aeda8e50041d62770bc67be81b57e0089b0237294f6c28279b",
         "c8552ee23e66018fd8a07fd827114e8c625b8be1912545339bb8e66679db9a9b",
         "5e621ac65175d29eaa18ba0a53fbfadbe19b15372cf53d50e9b60c70b8b55d27",
+        "375d603229549c68f01218577059b5d218f76a5d1133783d13a5d64b56935920",
     }
 )
-CATALOG_DISCOVERY_SOURCES = frozenset({"coinbase-bazaar", "x402-list", "x402scan"})
+CATALOG_DISCOVERY_SOURCES = frozenset(
+    {"coinbase-bazaar", "payapi-market", "x402-list", "x402scan"}
+)
 FORM_D_DOSSIER_PARSER_VERSION = "sec-form-d-company-dossier/0.1.0"
 PROCUREMENT_PROFILE_VERSION = "company-profile-procurement/0.1.0"
 PYTHON_RUN_VERSION = "isolated-python-run/0.1.0"
@@ -3251,11 +3254,13 @@ class EvidenceService:
                 """
                 SELECT DISTINCT canonical_request_hash
                 FROM evidence_attempts
-                WHERE user_agent_family IN ('coinbase-cdp', 'x402-list', 'x402scan')
+                WHERE user_agent_family IN (
+                    'coinbase-cdp', 'payapi-market', 'x402-list', 'x402scan'
+                )
                 """
             ).fetchall()
         published_example_request_hashes = (
-            CLEARLY_PUBLISHED_EXAMPLE_REQUEST_HASHES
+            KNOWN_CATALOG_REQUEST_HASHES
             | {row["canonical_request_hash"] for row in published_example_rows}
             | {row["canonical_request_hash"] for row in catalog_observed_rows}
         )
@@ -3387,6 +3392,12 @@ class EvidenceService:
         owner_direct_cost = Decimal(0)
         independent_paid_attempts = 0
         independent_fulfilled = 0
+        catalog_paid_attempts = 0
+        catalog_fulfilled = 0
+        catalog_failures = 0
+        non_catalog_paid_attempts = 0
+        non_catalog_fulfilled = 0
+        non_catalog_failures = 0
         catalog_sample_calls = 0
         catalog_sample_revenue = Decimal(0)
         catalog_sample_direct_cost = Decimal(0)
@@ -3420,6 +3431,10 @@ class EvidenceService:
                 "independent_gross_margin_usd": "0.00",
                 "independent_paid_or_settlement_failures": 0,
                 "independent_paid_fulfillment_rate_percent": None,
+                "catalog_payment_or_settlement_failures": 0,
+                "catalog_paid_fulfillment_rate_percent": None,
+                "non_catalog_payment_or_settlement_failures": 0,
+                "non_catalog_paid_fulfillment_rate_percent": None,
                 "paid_catalog_sample_calls": 0,
                 "paid_catalog_sample_buyer_clusters": 0,
                 "paid_catalog_sample_revenue_usd": "0.00",
@@ -3450,6 +3465,10 @@ class EvidenceService:
         }
         route_independent_paid_attempts = {route: 0 for route in funnels}
         route_independent_fulfilled = {route: 0 for route in funnels}
+        route_catalog_paid_attempts = {route: 0 for route in funnels}
+        route_catalog_fulfilled = {route: 0 for route in funnels}
+        route_non_catalog_paid_attempts = {route: 0 for route in funnels}
+        route_non_catalog_fulfilled = {route: 0 for route in funnels}
         route_catalog_sample_payers: dict[str, set[str]] = {
             route: set() for route in funnels
         }
@@ -3482,6 +3501,9 @@ class EvidenceService:
             response_status = row["response_status"]
             owner_flag = row["owner_or_test_flag"]
             payer = row["payer_wallet_hmac"]
+            is_catalog_request = (
+                row["canonical_request_hash"] in published_example_request_hashes
+            )
             try:
                 direct_cost = Decimal(str(row["direct_cost_estimate"] or 0))
             except InvalidOperation:
@@ -3501,6 +3523,18 @@ class EvidenceService:
                     funnels[route]["independent_paid_or_settlement_failures"] += 1
                     independent_paid_attempts += 1
                     route_independent_paid_attempts[route] += 1
+                    if is_catalog_request:
+                        catalog_failures += 1
+                        catalog_paid_attempts += 1
+                        funnels[route]["catalog_payment_or_settlement_failures"] += 1
+                        route_catalog_paid_attempts[route] += 1
+                    else:
+                        non_catalog_failures += 1
+                        non_catalog_paid_attempts += 1
+                        funnels[route][
+                            "non_catalog_payment_or_settlement_failures"
+                        ] += 1
+                        route_non_catalog_paid_attempts[route] += 1
                 continue
             if response_status != "FULFILLED":
                 continue
@@ -3527,7 +3561,11 @@ class EvidenceService:
                 price = Decimal(0)
             route_independent_revenue[route] += price
             independent_revenue += price
-            if row["canonical_request_hash"] in published_example_request_hashes:
+            if is_catalog_request:
+                catalog_fulfilled += 1
+                catalog_paid_attempts += 1
+                route_catalog_fulfilled[route] += 1
+                route_catalog_paid_attempts[route] += 1
                 catalog_sample_calls += 1
                 catalog_sample_revenue += price
                 catalog_sample_direct_cost += direct_cost
@@ -3536,6 +3574,10 @@ class EvidenceService:
                 route_catalog_sample_payers[route].add(payer)
                 route_catalog_sample_revenue[route] += price
             else:
+                non_catalog_fulfilled += 1
+                non_catalog_paid_attempts += 1
+                route_non_catalog_fulfilled[route] += 1
+                route_non_catalog_paid_attempts[route] += 1
                 non_catalog_calls += 1
                 non_catalog_revenue += price
                 non_catalog_direct_cost += direct_cost
@@ -3615,6 +3657,20 @@ class EvidenceService:
                     / route_independent_paid_attempts[route],
                     2,
                 )
+            if route_catalog_paid_attempts[route]:
+                funnel["catalog_paid_fulfillment_rate_percent"] = round(
+                    100
+                    * route_catalog_fulfilled[route]
+                    / route_catalog_paid_attempts[route],
+                    2,
+                )
+            if route_non_catalog_paid_attempts[route]:
+                funnel["non_catalog_paid_fulfillment_rate_percent"] = round(
+                    100
+                    * route_non_catalog_fulfilled[route]
+                    / route_non_catalog_paid_attempts[route],
+                    2,
+                )
 
         independent_buyers = len(payer_days)
         repeat_buyers = sum(1 for days in payer_days.values() if len(days) >= 2)
@@ -3626,6 +3682,16 @@ class EvidenceService:
         paid_fulfillment_rate = (
             Decimal(independent_fulfilled) / Decimal(independent_paid_attempts)
             if independent_paid_attempts
+            else None
+        )
+        catalog_paid_fulfillment_rate = (
+            Decimal(catalog_fulfilled) / Decimal(catalog_paid_attempts)
+            if catalog_paid_attempts
+            else None
+        )
+        non_catalog_paid_fulfillment_rate = (
+            Decimal(non_catalog_fulfilled) / Decimal(non_catalog_paid_attempts)
+            if non_catalog_paid_attempts
             else None
         )
         validated_demand_buyers = len(validated_demand_payer_days)
@@ -3653,10 +3719,22 @@ class EvidenceService:
             "paid_catalog_sample_direct_cost_usd": (
                 f"{catalog_sample_direct_cost:.2f}"
             ),
+            "catalog_payment_or_settlement_failures": catalog_failures,
+            "catalog_paid_fulfillment_rate_percent": (
+                round(100 * float(catalog_paid_fulfillment_rate), 2)
+                if catalog_paid_fulfillment_rate is not None
+                else None
+            ),
             "non_catalog_paid_calls": non_catalog_calls,
             "non_catalog_buyer_clusters": len(non_catalog_payers),
             "non_catalog_revenue_usd": f"{non_catalog_revenue:.2f}",
             "non_catalog_direct_cost_usd": f"{non_catalog_direct_cost:.2f}",
+            "non_catalog_payment_or_settlement_failures": non_catalog_failures,
+            "non_catalog_paid_fulfillment_rate_percent": (
+                round(100 * float(non_catalog_paid_fulfillment_rate), 2)
+                if non_catalog_paid_fulfillment_rate is not None
+                else None
+            ),
             "unattributed_non_catalog_paid_calls": unattributed_non_catalog_calls,
             "unattributed_non_catalog_buyer_clusters": len(
                 unattributed_non_catalog_payers
@@ -3695,8 +3773,8 @@ class EvidenceService:
                     validated_demand_repeat_buyers >= 2
                 ),
                 "paid_fulfillment_at_least_99_percent": bool(
-                    paid_fulfillment_rate is not None
-                    and paid_fulfillment_rate >= Decimal("0.99")
+                    non_catalog_paid_fulfillment_rate is not None
+                    and non_catalog_paid_fulfillment_rate >= Decimal("0.99")
                 ),
                 "no_buyer_above_50_percent_of_calls": bool(
                     validated_demand_top_buyer_share is not None
@@ -3709,6 +3787,7 @@ class EvidenceService:
                 "Unpaid 402 challenges include monitors and crawlers, so they are not treated as buyers or a conversion denominator.",
                 "A repeat buyer must fulfill calls on at least two distinct UTC dates.",
                 "Catalog samples include published request hashes and any hash observed from a known directory or marketplace monitor.",
+                "Raw paid fulfillment includes all signed attempts; catalog and non-catalog rates are reported separately so directory verifier failures do not distort commercial reliability.",
                 "Non-catalog calls without an agent-run identifier or a non-catalog declared discovery source remain unattributed and do not pass commercial scale gates.",
                 "Commercial scale gates count only attributable non-catalog paid requests; catalog samples remain cash revenue but are excluded from product-demand validation.",
             ],

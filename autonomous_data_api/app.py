@@ -1602,6 +1602,8 @@ def user_agent_family(user_agent: str | None) -> str:
     value = (user_agent or "").casefold()
     if not value:
         return "unknown"
+    if "payapi" in value:
+        return "payapi-market"
     if "coinbase" in value or "coinbase-cdp" in value:
         return "coinbase-cdp"
     if "x402-list" in value:
@@ -1695,11 +1697,19 @@ def payment_failure_diagnostics(
     settlement = decode_x402_json_header(response.headers.get("payment-response"))
     if settlement:
         reason = settlement.get("errorReason") or settlement.get("error_reason")
-        return "settlement", payment_failure_reason_code(reason)
+        reason_code = payment_failure_reason_code(reason)
+        return (
+            "settlement",
+            "settlement_rejected" if reason_code == "unclassified" else reason_code,
+        )
 
     payment_required = decode_x402_json_header(response.headers.get("payment-required"))
     reason = payment_required.get("error") if payment_required else None
-    return "verification", payment_failure_reason_code(reason)
+    reason_code = payment_failure_reason_code(reason)
+    return (
+        "verification",
+        "verification_rejected" if reason_code == "unclassified" else reason_code,
+    )
 
 
 def referrer_origin(value: str | None) -> str | None:
