@@ -155,6 +155,25 @@ def test_payment_failure_reason_preserves_safe_coinbase_evm_enums_only():
     )
 
 
+def test_payment_failure_reason_maps_known_text_without_persisting_details():
+    assert (
+        payment_failure_reason_code(
+            "payer has insufficient funds for customer@example.com"
+        )
+        == "insufficient_funds"
+    )
+    assert (
+        payment_failure_reason_code(
+            "authorization expired; valid before 2026-09-02T00:00:00Z"
+        )
+        == "invalid_exact_evm_payload_authorization_valid_before"
+    )
+    assert (
+        payment_failure_reason_code("invalid signature from wallet 0x123")
+        == "invalid_exact_evm_payload_signature"
+    )
+
+
 def test_payment_failure_diagnostics_does_not_persist_unknown_error_text():
     response = JSONResponse(
         content={},

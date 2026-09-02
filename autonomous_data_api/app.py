@@ -1670,15 +1670,34 @@ PAYMENT_FAILURE_REASON_PREFIXES = (
     "invalid_batch_settlement_evm_",
     "batch_settlement_",
 )
+PAYMENT_FAILURE_REASON_TEXT_PATTERNS = (
+    (("insufficient funds", "insufficient balance"), "insufficient_funds"),
+    (
+        ("validafter", "valid after", "not yet valid"),
+        "invalid_exact_evm_payload_authorization_valid_after",
+    ),
+    (
+        ("validbefore", "valid before", "authorization expired"),
+        "invalid_exact_evm_payload_authorization_valid_before",
+    ),
+    (
+        ("invalid signature", "signature verification"),
+        "invalid_exact_evm_payload_signature",
+    ),
+    (("no matching payment requirement",), "no_matching_payment_requirements"),
+)
 
 
 def payment_failure_reason_code(value: Any) -> str:
     if not isinstance(value, str) or not value.strip():
         return "unclassified"
     raw = value.strip()
+    normalized = raw.casefold()
+    for phrases, reason_code in PAYMENT_FAILURE_REASON_TEXT_PATTERNS:
+        if any(phrase in normalized for phrase in phrases):
+            return reason_code
     if len(raw) > 128 or not re.fullmatch(r"[a-z][a-z0-9_]*", raw):
         return "unclassified"
-    normalized = raw.casefold()
     if normalized in PAYMENT_FAILURE_REASON_CODES:
         return normalized
     if normalized.startswith(PAYMENT_FAILURE_REASON_PREFIXES):
