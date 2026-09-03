@@ -36,6 +36,7 @@ from autonomous_data_api.app import (
     evidence_mcp_service,
     evidence_service,
     load_cdp_api_key_secret,
+    normalize_payment_request_header,
     payment_failure_diagnostics,
     payment_failure_reason_code,
 )
@@ -98,6 +99,11 @@ def prepared(monkeypatch):
         evidence_service,
         "prepare_public_source_snapshot_quote",
         lambda _: make("public_source_snapshot_quote"),
+    )
+    monkeypatch.setattr(
+        evidence_service,
+        "prepare_payment_quote",
+        lambda _route, _request: make("x402_payment_quote"),
     )
 
 
@@ -206,6 +212,65 @@ def test_payment_failure_diagnostics_uses_safe_settlement_fallback():
         "settlement",
         "settlement_rejected",
     )
+
+
+def test_payment_failure_diagnostics_classifies_payment_infrastructure_errors():
+    response = JSONResponse(content={}, status_code=502)
+
+    assert payment_failure_diagnostics(response, "signed") == (
+        "infrastructure",
+        "payment_processing_unavailable",
+    )
+
+
+def test_v2_payload_under_x_payment_is_promoted_for_sdk_compatibility():
+    mini_app = FastAPI()
+
+    @mini_app.get("/")
+    def inspect_payment(request: Request):
+        signature, family, version = normalize_payment_request_header(request)
+        return {
+            "signature": signature,
+            "family": family,
+            "version": version,
+            "promoted": request.headers.get("payment-signature"),
+        }
+
+    encoded = encoded_header({"x402Version": 2, "payload": {}})
+    with TestClient(mini_app) as test_client:
+        response = test_client.get("/", headers={"X-Payment": encoded})
+
+    assert response.json() == {
+        "signature": encoded,
+        "family": "x-payment-v2-promoted",
+        "version": 2,
+        "promoted": encoded,
+    }
+
+
+def test_v1_x_payment_is_detected_without_unsafe_envelope_rewrite():
+    mini_app = FastAPI()
+
+    @mini_app.get("/")
+    def inspect_payment(request: Request):
+        signature, family, version = normalize_payment_request_header(request)
+        return {
+            "signature": signature,
+            "family": family,
+            "version": version,
+            "promoted": request.headers.get("payment-signature"),
+        }
+
+    encoded = encoded_header({"x402Version": 1, "scheme": "exact"})
+    with TestClient(mini_app) as test_client:
+        response = test_client.get("/", headers={"X-Payment": encoded})
+
+    assert response.json() == {
+        "signature": encoded,
+        "family": "x-payment-v1",
+        "version": 1,
+        "promoted": None,
+    }
 
 
 def test_cdp_secret_can_be_loaded_from_base64(monkeypatch):
@@ -503,6 +568,32 @@ def test_machine_discovery_and_crawler_surfaces(client):
     )
 
 
+def test_browser_agents_can_read_and_submit_x402_headers(client, prepared):
+    preflight = client.options(
+        "/v1/ofac/payment-preflight",
+        headers={
+            "Origin": "https://agent.example",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type,payment-signature",
+        },
+    )
+    assert preflight.status_code == 200
+    assert preflight.headers["access-control-allow-origin"] == "*"
+    assert "payment-signature" in preflight.headers[
+        "access-control-allow-headers"
+    ].casefold()
+
+    challenge = client.post(
+        "/v1/ofac/payment-preflight",
+        headers={"Origin": "https://agent.example"},
+    )
+    assert challenge.status_code == 402
+    assert challenge.headers["access-control-allow-origin"] == "*"
+    exposed = challenge.headers["access-control-expose-headers"].casefold()
+    assert "payment-required" in exposed
+    assert "payment-response" in exposed
+
+
 def test_free_capability_request_is_private_deduplicated_and_advertised(client):
     payload = {
         "job_to_be_done": "Verify a supplier before an autonomous purchase",
@@ -719,6 +810,8 @@ def test_payment_attempt_captures_privacy_safe_agent_attribution(
         "response_status": "PAYMENT_REQUIRED",
         "latency_ms": captured["latency_ms"],
         "payment_signature": None,
+        "payment_header_family": None,
+        "payment_protocol_version": None,
         "settlement_tx_hash": None,
         "payer_wallet": None,
         "client_identifier": "203.0.113.42",
@@ -766,11 +859,12 @@ def test_empty_json_object_is_a_marketplace_payment_probe(client, prepared, path
 def test_post_payment_marketplace_probe_uses_declared_input(monkeypatch):
     probe_payload = {"code": "print(42)", "timeout_seconds": 5}
     mini_app = FastAPI()
+    received = []
 
     @mini_app.post("/v1/compute/python-run")
-    def challenge(request: Request, payload: dict | None = None):
-        del payload
+    def challenge(request: Request, payload: PythonRunRequest):
         assert isinstance(request.state.evidence_validated, PythonRunRequest)
+        received.append(payload.model_dump(mode="json"))
         return Response(status_code=402)
 
     monkeypatch.setattr(
@@ -787,9 +881,20 @@ def test_post_payment_marketplace_probe_uses_declared_input(monkeypatch):
     mini_app.add_middleware(EvidencePrecomputeMiddleware, service=evidence_service)
 
     with TestClient(mini_app) as test_client:
-        response = test_client.post("/v1/compute/python-run", json={})
+        empty_response = test_client.post("/v1/compute/python-run")
+        object_response = test_client.post("/v1/compute/python-run", json={})
+        paid_retry_response = test_client.post(
+            "/v1/compute/python-run",
+            json={},
+            headers={
+                "X-Payment": encoded_header({"x402Version": 2, "payload": {}})
+            },
+        )
 
-    assert response.status_code == 402
+    assert empty_response.status_code == 402
+    assert object_response.status_code == 402
+    assert paid_retry_response.status_code == 402
+    assert received == [probe_payload, probe_payload, probe_payload]
 
 
 def test_legacy_fly_origin_retires_paid_routes_and_redirects_public_pages(client):
@@ -824,13 +929,13 @@ def test_invalid_input_is_rejected_before_payment(client):
     assert response.json()["error"]["code"] == "INVALID_INPUT"
 
 
-def test_stale_source_is_rejected_before_payment(client, monkeypatch):
+def test_stale_source_check_does_not_block_catalog_probe_or_charge(client, monkeypatch):
     monkeypatch.setattr(
         evidence_service,
         "prepare_ofac",
         lambda _: (_ for _ in ()).throw(SourceStaleError("fixture stale source")),
     )
-    response = client.post(
+    probe = client.post(
         "/v1/ofac/exact-identifier-evidence",
         json={
             "identifier_type": "ofac_uid",
@@ -838,9 +943,21 @@ def test_stale_source_is_rejected_before_payment(client, monkeypatch):
             "lists": ["SDN"],
         },
     )
-    assert response.status_code == 503
-    assert "payment-required" not in response.headers
-    assert response.json()["error"]["code"] == "SOURCE_STALE"
+    assert probe.status_code == 402
+    assert "payment-required" in probe.headers
+
+    paid_retry = client.post(
+        "/v1/ofac/exact-identifier-evidence",
+        json={
+            "identifier_type": "ofac_uid",
+            "identifier": "36",
+            "lists": ["SDN"],
+        },
+        headers={"Payment-Signature": "signed"},
+    )
+    assert paid_retry.status_code == 503
+    assert "payment-required" not in paid_retry.headers
+    assert paid_retry.json()["error"]["code"] == "SOURCE_STALE"
 
 
 def test_cdp_facilitator_auth_signs_each_endpoint_for_mainnet():

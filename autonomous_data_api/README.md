@@ -84,11 +84,11 @@ The OFAC preflight returns a compact decision for an exact EVM address. The prem
 ## Payment and Fulfilment Flow
 
 1. The outer evidence middleware validates the POST body.
-2. It refreshes or verifies an allowlisted official source and precomputes a valid result.
-3. Invalid, stale, broken-source, or oversized requests fail before a payment challenge.
-4. x402 v2 returns a Bazaar-compatible HTTP 402 challenge.
-5. A compatible buyer pays and retries automatically.
-6. The already prepared result is returned. Premium evidence routes include an Ed25519 receipt and source hashes.
+2. An unpaid request gets a fetch-free quote record and a Bazaar-compatible x402 v2 challenge.
+3. A compatible buyer pays and retries automatically.
+4. The retry refreshes or verifies the source and prepares the result before verification and settlement.
+5. Invalid, stale, broken-source, or oversized paid retries fail without settlement.
+6. The prepared result is returned. Premium evidence routes include an Ed25519 receipt and source hashes.
 7. A fulfilled buyer can replay the stored result with the original `Payment-Signature` at `/v1/evidence/replay/{request_id}` without a second charge.
 
 The composed dossier uses a separate payment-first path: x402 verifies the
@@ -108,17 +108,18 @@ One customer payment can reserve at most `$0.015` across create, execute, and
 terminate. A completed identical retry replays the stored response without
 buying another sandbox.
 
-For directory and uptime monitoring, an empty unauthenticated `POST` is a
+For directory and uptime monitoring, an empty or literal `{}` `POST` is a
 supported probe for all paid routes. It uses the route's published Bazaar
-example request and returns the normal 402 challenge. A literal `{}`, malformed
-JSON, or any other schema-invalid non-empty body is still rejected before the
-payment layer.
+example request, returns the normal 402 challenge, and preserves that request
+on a paid retry. Malformed JSON or any other schema-invalid non-empty body is
+still rejected before the payment layer.
 
 Every attempt is written to a reconciliation ledger. Testnet and configured owner-wallet traffic are explicitly excluded from independent-demand interpretation.
 
 Agents may optionally send `X-Agent-Discovery-Source` (for example,
 `coinbase-bazaar`, `x402-list`, or `direct`) and `X-Agent-Run-Id`. Client IP,
-full User-Agent, and agent-run values are stored only as keyed HMACs. The ledger
+full User-Agent, and agent-run values are stored only as keyed HMACs. Payment
+header family and protocol version are retained without signature material. The ledger
 keeps only a broad User-Agent family and the origin portion of a valid referrer;
 it never stores a raw client IP or a referrer path/query. Attribution headers are
 self-declared evidence, not verified identity.

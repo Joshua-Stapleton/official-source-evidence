@@ -608,6 +608,8 @@ class EvidenceService:
                     quoted_price TEXT NOT NULL,
                     network TEXT NOT NULL,
                     payment_identifier TEXT,
+                    payment_header_family TEXT,
+                    payment_protocol_version INTEGER,
                     settlement_tx_hash TEXT,
                     payer_wallet_hmac TEXT,
                     owner_or_test_flag TEXT NOT NULL DEFAULT 'UNKNOWN',
@@ -676,6 +678,8 @@ class EvidenceService:
                 "http_status": "INTEGER",
                 "payment_failure_stage": "TEXT",
                 "payment_failure_reason": "TEXT",
+                "payment_header_family": "TEXT",
+                "payment_protocol_version": "INTEGER",
             }
             for column, column_type in attribution_columns.items():
                 if column not in existing_columns:
@@ -2443,6 +2447,29 @@ class EvidenceService:
             include_receipt=False,
         )
 
+    def prepare_payment_quote(
+        self, route: str, request: BaseModel
+    ) -> PreparedResult:
+        """Create a fetch-free placeholder for an unpaid x402 challenge."""
+        request_hash = sha256_json(request.model_dump(mode="json"))
+        source_bundle_hash = sha256_bytes(f"x402-quote/0.1.0:{route}".encode())
+        return self._store_prepared(
+            "x402_payment_quote",
+            request_hash,
+            source_bundle_hash,
+            {
+                "product": "X402_PAYMENT_QUOTE",
+                "route": route,
+                "status": "PAYMENT_REQUIRED",
+                "provenance": {
+                    "engine_version": "x402-payment-quote/0.1.0",
+                    "request_sha256": f"sha256:{request_hash}",
+                    "result_sha256": None,
+                },
+            },
+            include_receipt=False,
+        )
+
     def prepare_sec(self, request: SecDeltaRequest) -> PreparedResult:
         request_payload = request.model_dump(mode="json")
         request_hash = sha256_json(request_payload)
@@ -2894,6 +2921,8 @@ class EvidenceService:
         latency_ms: int,
         direct_cost_estimate: Decimal = Decimal(0),
         payment_signature: str | None = None,
+        payment_header_family: str | None = None,
+        payment_protocol_version: int | None = None,
         settlement_tx_hash: str | None = None,
         payer_wallet: str | None = None,
         client_identifier: str | None = None,
@@ -2952,7 +2981,8 @@ class EvidenceService:
                 INSERT INTO evidence_attempts (
                     request_id, timestamp_utc, route, canonical_request_hash,
                     response_hash, source_bundle_hash, quoted_price, network,
-                    payment_identifier, settlement_tx_hash, payer_wallet_hmac,
+                    payment_identifier, payment_header_family,
+                    payment_protocol_version, settlement_tx_hash, payer_wallet_hmac,
                     owner_or_test_flag, response_status, latency_ms,
                     direct_cost_estimate, client_hmac, user_agent_hmac,
                     user_agent_family, referrer_origin, edge_region,
@@ -2961,7 +2991,7 @@ class EvidenceService:
                     payment_failure_stage, payment_failure_reason, created_at
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -2974,6 +3004,8 @@ class EvidenceService:
                     quoted_price,
                     network,
                     payment_identifier,
+                    payment_header_family,
+                    payment_protocol_version,
                     settlement_tx_hash,
                     payer_hmac,
                     owner_or_test,
@@ -3230,8 +3262,26 @@ class EvidenceService:
                        COUNT(*) AS attempts,
                        MAX(timestamp_utc) AS last_seen_at
                 FROM evidence_attempts
-                WHERE response_status = 'PAYMENT_OR_SETTLEMENT_FAILED'
+                WHERE response_status IN (
+                    'PAYMENT_OR_SETTLEMENT_FAILED',
+                    'PAYMENT_INFRASTRUCTURE_FAILED'
+                )
                 GROUP BY route, network, owner_or_test_flag, stage, reason
+                ORDER BY last_seen_at DESC
+                """
+            ).fetchall()
+            payment_protocol_rows = connection.execute(
+                """
+                SELECT
+                    COALESCE(payment_header_family, 'unclassified') AS header_family,
+                    COALESCE(CAST(payment_protocol_version AS TEXT), 'unknown')
+                        AS protocol_version,
+                    response_status,
+                    COUNT(*) AS attempts,
+                    MAX(timestamp_utc) AS last_seen_at
+                FROM evidence_attempts
+                WHERE payment_identifier IS NOT NULL
+                GROUP BY header_family, protocol_version, response_status
                 ORDER BY last_seen_at DESC
                 """
             ).fetchall()
@@ -3278,10 +3328,14 @@ class EvidenceService:
                 **dict(attribution_summary),
                 "user_agent_families": [dict(row) for row in user_agent_rows],
                 "declared_discovery_sources": [dict(row) for row in discovery_rows],
+                "payment_client_protocols": [
+                    dict(row) for row in payment_protocol_rows
+                ],
                 "measurement_notes": [
                     "Client, user-agent, and agent-run identifiers are stored only as keyed HMACs.",
                     "Discovery source is optional and self-declared; absence does not imply direct traffic.",
                     "Attempts recorded before attribution deployment remain unclassified.",
+                    "Payment header family and protocol version contain no signature material.",
                 ],
             },
         }

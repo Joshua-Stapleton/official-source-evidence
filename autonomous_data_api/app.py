@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 
 from cdp.auth.utils.jwt import JwtOptions, generate_jwt
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import (
     FileResponse,
@@ -30,6 +31,7 @@ from fastapi.responses import (
 )
 from pydantic import BaseModel, Field, ValidationError
 from starlette.concurrency import run_in_threadpool
+from starlette.datastructures import Headers, MutableHeaders
 from starlette.middleware.base import BaseHTTPMiddleware
 from x402.extensions.bazaar import OutputConfig, declare_discovery_extension
 from x402.http import (
@@ -1568,6 +1570,58 @@ def decode_x402_json_header(value: str | None) -> dict[str, Any]:
         return {}
 
 
+def normalize_payment_request_header(
+    request: Request,
+) -> tuple[str | None, str | None, int | None]:
+    """Bridge v2 payloads sent with the legacy header and retain safe metadata."""
+    modern = request.headers.get("payment-signature")
+    legacy = request.headers.get("x-payment")
+    payment_signature = modern or legacy
+    if not payment_signature:
+        return None, None, None
+
+    payload = decode_x402_json_header(payment_signature)
+    raw_version = payload.get("x402Version")
+    if isinstance(raw_version, int) and not isinstance(raw_version, bool):
+        protocol_version = raw_version
+    elif modern:
+        protocol_version = 2
+    elif legacy:
+        protocol_version = 1
+    else:
+        protocol_version = None
+
+    if modern and legacy:
+        return modern, "payment-signature-preferred", protocol_version
+    if modern:
+        return modern, "payment-signature", protocol_version
+    if protocol_version == 2:
+        MutableHeaders(scope=request.scope)["payment-signature"] = legacy or ""
+        request._headers = Headers(scope=request.scope)  # type: ignore[attr-defined]
+        return legacy, "x-payment-v2-promoted", protocol_version
+    if protocol_version == 1:
+        return legacy, "x-payment-v1", protocol_version
+    return legacy, "x-payment-unknown", protocol_version
+
+
+def replace_request_body_with_json(request: Request, payload: dict[str, Any]) -> None:
+    encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    request._body = encoded  # type: ignore[attr-defined]
+    headers = MutableHeaders(scope=request.scope)
+    headers["content-type"] = "application/json"
+    headers["content-length"] = str(len(encoded))
+    request._headers = Headers(scope=request.scope)  # type: ignore[attr-defined]
+
+
+def apply_payment_response_compatibility(
+    response: Response, payment_header_family: str | None
+) -> None:
+    if payment_header_family and payment_header_family.startswith("x-payment"):
+        settlement = response.headers.get("payment-response")
+        if settlement and "x-payment-response" not in response.headers:
+            response.headers["X-Payment-Response"] = settlement
+
+
 def find_wallet(value: Any) -> str | None:
     if isinstance(value, dict):
         for key in ("payer", "from", "owner"):
@@ -1708,9 +1762,16 @@ def payment_failure_reason_code(value: Any) -> str:
 
 
 def payment_failure_diagnostics(
-    response: Response, payment_signature: str | None
+    response: Response,
+    payment_signature: str | None,
+    payment_header_family: str | None = None,
+    payment_protocol_version: int | None = None,
 ) -> tuple[str | None, str | None]:
-    if response.status_code != 402 or not payment_signature:
+    if not payment_signature:
+        return None, None
+    if response.status_code in {500, 502, 504}:
+        return "infrastructure", "payment_processing_unavailable"
+    if response.status_code != 402:
         return None, None
 
     settlement = decode_x402_json_header(response.headers.get("payment-response"))
@@ -1725,6 +1786,16 @@ def payment_failure_diagnostics(
     payment_required = decode_x402_json_header(response.headers.get("payment-required"))
     reason = payment_required.get("error") if payment_required else None
     reason_code = payment_failure_reason_code(reason)
+    if reason_code == "unclassified":
+        if payment_header_family == "x-payment-v1":
+            return "protocol", "legacy_v1_payment_not_accepted"
+        if (
+            payment_header_family is not None
+            and payment_protocol_version not in {1, 2}
+        ):
+            return "protocol", "malformed_payment_header"
+        if payment_header_family == "x-payment-v2-promoted":
+            return "verification", "promoted_payment_payload_not_accepted"
     return (
         "verification",
         "verification_rejected" if reason_code == "unclassified" else reason_code,
@@ -1875,9 +1946,15 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
         probe_payload: dict[str, Any],
     ) -> Response:
         started = time.monotonic()
-        payment_signature = request.headers.get(
-            "payment-signature"
-        ) or request.headers.get("x-payment")
+        payment_signature = getattr(
+            request.state, "evidence_payment_signature", None
+        )
+        payment_header_family = getattr(
+            request.state, "evidence_payment_header_family", None
+        )
+        payment_protocol_version = getattr(
+            request.state, "evidence_payment_protocol_version", None
+        )
         if os.getenv("AUTONOMOUS_EVIDENCE_ENABLED", "1") != "1":
             return JSONResponse(
                 status_code=503,
@@ -1905,6 +1982,7 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
         body = await request.body()
         if not body:
             payload = probe_payload
+            replace_request_body_with_json(request, probe_payload)
         else:
             try:
                 payload = json.loads(body)
@@ -1913,11 +1991,9 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
                     status_code=400,
                     content={"error": {"code": "INVALID_JSON"}},
                 )
-        if not payment_signature and payload == {}:
+        if payload == {}:
             payload = probe_payload
-            request._body = json.dumps(  # type: ignore[attr-defined]
-                probe_payload, separators=(",", ":")
-            ).encode("utf-8")
+            replace_request_body_with_json(request, probe_payload)
         if (
             len(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
             > maximum_body_bytes
@@ -1940,6 +2016,7 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
             )
         request.state.evidence_validated = validated
         response = await call_next(request)
+        apply_payment_response_compatibility(response, payment_header_family)
         prepared: PreparedResult | None = getattr(
             request.state, "evidence_prepared", None
         )
@@ -1975,7 +2052,10 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
         )
         payer_wallet = find_wallet(payment_payload)
         payment_failure_stage, payment_failure_reason = payment_failure_diagnostics(
-            response, payment_signature
+            response,
+            payment_signature,
+            payment_header_family,
+            payment_protocol_version,
         )
         if response.status_code == 402 and not payment_signature:
             response_status = "PAYMENT_REQUIRED"
@@ -1983,8 +2063,29 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
             response_status = "FULFILLED"
         elif response.status_code == 402:
             response_status = "PAYMENT_OR_SETTLEMENT_FAILED"
+        elif payment_signature and response.status_code in {500, 502, 504}:
+            response_status = "PAYMENT_INFRASTRUCTURE_FAILED"
         else:
             response_status = f"HTTP_{response.status_code}"
+        if payment_failure_stage:
+            response.headers["X-Evidence-Payment-Failure-Stage"] = payment_failure_stage
+            response.headers["X-Evidence-Payment-Failure-Reason"] = (
+                payment_failure_reason or "unclassified"
+            )
+            if response.status_code in {502, 504} and "retry-after" not in response.headers:
+                response.headers["Retry-After"] = "2"
+            logger.warning(
+                "x402 payment failure request_id=%s route=%s stage=%s reason=%s "
+                "header_family=%s protocol_version=%s edge_region=%s proxy_request_id=%s",
+                prepared.request_id,
+                request.url.path,
+                payment_failure_stage,
+                payment_failure_reason or "unclassified",
+                payment_header_family,
+                payment_protocol_version,
+                normalized_header_token(request.headers.get("fly-region"), 16),
+                normalized_header_token(request.headers.get("fly-request-id"), 128),
+            )
         try:
             raw_user_agent = request.headers.get("user-agent")
             await run_in_threadpool(
@@ -1999,6 +2100,8 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
                     request.state, "evidence_direct_cost_usd", Decimal(0)
                 ),
                 payment_signature=payment_signature,
+                payment_header_family=payment_header_family,
+                payment_protocol_version=payment_protocol_version,
                 settlement_tx_hash=settlement_tx_hash,
                 payer_wallet=payer_wallet,
                 client_identifier=request_client_identifier(request),
@@ -2026,6 +2129,14 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Any) -> Any:
         if PUBLIC_SCHEME in {"http", "https"}:
             request.scope["scheme"] = PUBLIC_SCHEME
+        (
+            payment_signature,
+            payment_header_family,
+            payment_protocol_version,
+        ) = normalize_payment_request_header(request)
+        request.state.evidence_payment_signature = payment_signature
+        request.state.evidence_payment_header_family = payment_header_family
+        request.state.evidence_payment_protocol_version = payment_protocol_version
         route = self.ROUTES.get(request.url.path)
         post_payment_route = self.POST_PAYMENT_ROUTES.get(request.url.path)
         if request.method == "POST" and post_payment_route is not None:
@@ -2069,12 +2180,10 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
 
         model_class, prepare_method_name, quoted_price, probe_payload = route
         started = time.monotonic()
-        payment_signature = request.headers.get(
-            "payment-signature"
-        ) or request.headers.get("x-payment")
         body = await request.body()
         if not body:
             payload = probe_payload
+            replace_request_body_with_json(request, probe_payload)
         else:
             try:
                 payload = json.loads(body)
@@ -2088,11 +2197,9 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
                         }
                     },
                 )
-        if not payment_signature and payload == {}:
+        if payload == {}:
             payload = probe_payload
-            request._body = json.dumps(  # type: ignore[attr-defined]
-                probe_payload, separators=(",", ":")
-            ).encode("utf-8")
+            replace_request_body_with_json(request, probe_payload)
         if len(json.dumps(payload, separators=(",", ":")).encode("utf-8")) > 8192:
             return JSONResponse(
                 status_code=413,
@@ -2117,13 +2224,15 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
             )
         request.state.evidence_validated = validated
         try:
-            if request.url.path == "/v1/web/source-snapshot" and not payment_signature:
-                prepare_method = self.service.prepare_public_source_snapshot_quote
+            if not payment_signature:
+                prepared = await run_in_threadpool(
+                    self.service.prepare_payment_quote,
+                    request.url.path,
+                    validated,
+                )
             else:
                 prepare_method = getattr(self.service, prepare_method_name)
-            prepared: PreparedResult = await run_in_threadpool(
-                prepare_method, validated
-            )
+                prepared = await run_in_threadpool(prepare_method, validated)
         except EvidenceError as exc:
             return JSONResponse(
                 status_code=exc.status_code,
@@ -2147,6 +2256,7 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
                 },
             )
         response = await call_next(request)
+        apply_payment_response_compatibility(response, payment_header_family)
         response.headers["X-Evidence-Request-Id"] = prepared.request_id
         response.headers["X-Evidence-Request-Hash"] = f"sha256:{prepared.request_hash}"
         response.headers["X-Evidence-Result-Hash"] = f"sha256:{prepared.result_hash}"
@@ -2158,7 +2268,10 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
         )
         payer_wallet = find_wallet(payment_payload)
         payment_failure_stage, payment_failure_reason = payment_failure_diagnostics(
-            response, payment_signature
+            response,
+            payment_signature,
+            payment_header_family,
+            payment_protocol_version,
         )
         if response.status_code == 402 and not payment_signature:
             response_status = "PAYMENT_REQUIRED"
@@ -2166,6 +2279,8 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
             response_status = "FULFILLED"
         elif response.status_code == 402:
             response_status = "PAYMENT_OR_SETTLEMENT_FAILED"
+        elif payment_signature and response.status_code in {500, 502, 504}:
+            response_status = "PAYMENT_INFRASTRUCTURE_FAILED"
         else:
             response_status = f"HTTP_{response.status_code}"
         if payment_failure_stage:
@@ -2175,14 +2290,18 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
             )
             logger.warning(
                 "x402 payment failure request_id=%s route=%s stage=%s reason=%s "
-                "edge_region=%s proxy_request_id=%s",
+                "header_family=%s protocol_version=%s edge_region=%s proxy_request_id=%s",
                 prepared.request_id,
                 request.url.path,
                 payment_failure_stage,
                 payment_failure_reason or "unclassified",
+                payment_header_family,
+                payment_protocol_version,
                 normalized_header_token(request.headers.get("fly-region"), 16),
                 normalized_header_token(request.headers.get("fly-request-id"), 128),
             )
+            if response.status_code in {502, 504} and "retry-after" not in response.headers:
+                response.headers["Retry-After"] = "2"
         try:
             client_identifier = request_client_identifier(request)
             raw_user_agent = request.headers.get("user-agent")
@@ -2195,6 +2314,8 @@ class EvidencePrecomputeMiddleware(BaseHTTPMiddleware):
                 response_status=response_status,
                 latency_ms=int((time.monotonic() - started) * 1000),
                 payment_signature=payment_signature,
+                payment_header_family=payment_header_family,
+                payment_protocol_version=payment_protocol_version,
                 settlement_tx_hash=settlement_tx_hash,
                 payer_wallet=payer_wallet,
                 client_identifier=client_identifier,
@@ -2373,6 +2494,27 @@ class AgentFeedbackDiscoveryMiddleware(BaseHTTPMiddleware):
 
 
 app.add_middleware(AgentFeedbackDiscoveryMiddleware)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+    expose_headers=[
+        "Payment-Required",
+        "Payment-Response",
+        "X-Payment-Response",
+        "X-Evidence-Request-Id",
+        "X-Evidence-Request-Hash",
+        "X-Evidence-Result-Hash",
+        "X-Evidence-Payment-Failure-Stage",
+        "X-Evidence-Payment-Failure-Reason",
+        "X-Agent-Feedback-URL",
+        "Retry-After",
+        "Link",
+    ],
+)
 
 
 @app.get("/health")

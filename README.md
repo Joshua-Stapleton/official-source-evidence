@@ -33,8 +33,10 @@ actions are recorded in
 
 All routes use x402 v2 on Base mainnet. An x402-compatible client receives a
 standard HTTP 402 challenge, pays USDC, retries automatically, and receives the
-JSON result. The production service has a hard `$10.00` accepted-revenue cap
-per UTC day.
+JSON result. Browser clients can read the payment headers through CORS. During
+the v1-to-v2 transition, a v2 payload sent under the legacy `X-Payment` header
+is promoted to `Payment-Signature`. The production service has a hard `$10.00`
+accepted-revenue cap per UTC day.
 
 The procurement experiment tests a brokered action, not another raw-data
 wrapper. A free quote at `POST /v1/procure/company-profile/quote` exposes the
@@ -53,10 +55,11 @@ normalized text rather than raw pages, and expires automatically after 30 days.
 The paid response returns a bearer token for private status polling and, when
 requested, a separate HMAC secret for verifying change webhooks.
 
-Monitoring tools may send an empty unauthenticated `POST` to any paid route.
-The service treats that as the published example request and returns the normal
-HTTP 402 challenge without charging. Non-empty malformed or schema-invalid
-requests are still rejected before payment.
+Monitoring tools may send an empty or `{}` unauthenticated `POST` to any paid
+route. The service treats that as the published example request and returns the
+normal HTTP 402 challenge without fetching upstream data or charging. The same
+substitution is preserved on the paid retry so a catalogue purchase can finish.
+Malformed or other schema-invalid requests are still rejected before payment.
 
 ## Discover and Inspect
 
